@@ -1,0 +1,71 @@
+# acer-fan-profiles configuration
+# Acer Predator PTX17-71 — Pop!_OS 24.04 LTS
+#
+# Edit thresholds below to tune when profiles switch.
+# Run 'afp reload' after changes (no restart needed).
+
+# How often to check sensors (seconds)
+polling_interval: 3
+
+# CPU load thresholds (% average across all cores)
+# Tuned for development workloads (AI agents, compilation, IDE)
+cpu_load_low: 12      # Below this: quiet (20% fans)
+cpu_load_medium: 25   # Below this: balanced (50% fans)
+cpu_load_high: 50     # Above this: performance/turbo
+
+# GPU utilization threshold (% — triggers higher profiles)
+# Raised from 15 to 50 because desktop compositor uses 30-50%
+gpu_util_active: 50
+
+# Temperature thresholds (°C — i9-13900HX TJunction is 100°C)
+# NOTE: Now using MAXIMUM core temperature with 3-sample smoothing
+# Thermal hysteresis bands prevent oscillation at boundaries
+
+# Elevated thermal (performance profile — 75% fans)
+temp_elevated_trigger: 78    # Activate performance mode when crossing up to 78°C
+temp_elevated_release: 71    # Deactivate when dropping below 71°C (7°C band)
+
+# Escalate thermal (turbo profile — 100% fans)
+temp_escalate_trigger: 88    # Activate turbo when crossing up to 88°C
+temp_escalate_release: 81    # Deactivate when dropping below 81°C (7°C band)
+
+# Critical thermal (emergency turbo — 100% fans)
+temp_critical_trigger: 96    # Activate emergency mode at 96°C
+temp_critical_release: 89    # Deactivate when dropping below 89°C (7°C band)
+
+# Thermal zones explained (MAX CORE TEMP with smoothing):
+# Below 71°C: Normal AC/battery rules apply
+# 71-77°C: Hysteresis zone (elevated thermal may still be active)
+# 78-87°C: Performance profile (elevated thermal active)
+# 81-87°C: Hysteresis zone (escalate thermal may still be active)
+# 88-95°C: Turbo profile (escalate thermal active)
+# 89-95°C: Hysteresis zone (critical thermal may still be active)
+# 96°C+:   Emergency turbo (critical thermal active)
+#
+# Benefits:
+# - 7°C hysteresis bands prevent rapid oscillation
+# - Tuned for i9-13900HX thermal characteristics (TJunction=100°C)
+# - Smoother fan speed transitions
+# - More predictable thermal behavior
+# - Allows CPU boost behavior while maintaining safety margin
+
+# Hysteresis delays (seconds — prevents rapid profile flapping)
+# Upgrade: how long sustained high load before switching up
+# Downgrade: how long sustained low load before switching down
+upgrade_delay: 5
+downgrade_delay: 15
+
+# Desktop notifications on profile changes
+notify_enabled: true
+notify_debounce: 10
+
+# Log level: debug, info, warn, error
+log_level: debug
+
+# Fan speeds per profile (% — 0=auto/EC, 1-100=manual)
+fan_speed_turbo: 100
+fan_speed_performance: 75
+fan_speed_balanced_performance: 60
+fan_speed_balanced: 50
+fan_speed_quiet: 20
+fan_speed_low_power: 0

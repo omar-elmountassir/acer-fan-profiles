@@ -1,0 +1,1208 @@
+#!/bin/bash
+# acer-fan-profiles — Smart fan profile daemon for Acer Predator PTX17-71
+# Works alongside system76-power to provide load-aware 5-profile auto-switching.
+#
+# Profiles: low-power | quiet | balanced | balanced-performance | performance
+# Monitors: CPU load, GPU utilization, CPU temperature, AC/battery state
+# Features: hysteresis (anti-flap), manual override, desktop notifications, logging
+
+set -euo pipefail
+
+readonly VERSION="1.0.0"
+readonly STATE_DIR="/run/acer-fan-profiles"
+readonly STATE_FILE="${STATE_DIR}/state.json"
+readonly OVERRIDE_FILE="${STATE_DIR}/override"
+readonly PID_FILE="${STATE_DIR}/daemon.pid"
+readonly HYSTERESIS_STATE_FILE="${STATE_DIR}/hysteresis.state"
+readonly TEMP_HISTORY_FILE="${STATE_DIR}/temp_history.state"
+readonly THERMAL_STATE_FILE="${STATE_DIR}/thermal.state"
+readonly PROFILE_PATH="/sys/firmware/acpi/platform_profile"
+readonly PROFILE_CHOICES_PATH="/sys/firmware/acpi/platform_profile_choices"
+readonly POWER_SUPPLY_PATH="/sys/class/power_supply/ACAD/online"
+readonly LINUWU_FAN_SPEED="/sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense/fan_speed"
+
+# Linuwu-Sense detection (set at init)
+LINUWU_AVAILABLE=false
+readonly CONFIG_DIR="${HOME}/.config/acer-fan-profiles"
+readonly CONFIG_FILE="${CONFIG_DIR}/config.yaml"
+
+# Ordered profiles (index = level)
+# turbo is Linuwu-Sense only (not available via platform_profile)
+readonly PROFILES=("low-power" "quiet" "balanced" "balanced-performance" "performance" "turbo")
+
+# ─── Default Configuration ───────────────────────────────────────────────────
+
+POLLING_INTERVAL=3
+CPU_LOAD_LOW=15
+CPU_LOAD_MEDIUM=40
+CPU_LOAD_HIGH=70
+
+# Cooperative mode: respect system76-power, only add Linuwu fan control
+COOPERATIVE_MODE=false
+GPU_UTIL_ACTIVE=50  # Accounts for desktop compositor GPU usage
+
+# Legacy thermal thresholds (backward compatibility - overridden by config)
+TEMP_ESCALATE=85
+TEMP_CRITICAL=95
+TEMP_ELEVATED=68
+
+# Thermal hysteresis bands (default - overridden by config)
+TEMP_ELEVATED_TRIGGER=72
+TEMP_ELEVATED_RELEASE=66
+TEMP_ESCALATE_TRIGGER=80
+TEMP_ESCALATE_RELEASE=74
+TEMP_CRITICAL_TRIGGER=90
+TEMP_CRITICAL_RELEASE=84
+
+UPGRADE_DELAY=5
+DOWNGRADE_DELAY=15
+
+# Fan speeds per profile (% — 0=auto/EC, 1-100=manual)
+FAN_SPEED_TURBO=100
+FAN_SPEED_PERFORMANCE=75
+FAN_SPEED_BALANCED_PERFORMANCE=60
+FAN_SPEED_BALANCED=50
+FAN_SPEED_QUIET=20
+FAN_SPEED_LOW_POWER=0
+
+NOTIFY_ENABLED=true
+NOTIFY_DEBOUNCE=10
+LOG_LEVEL="debug"  # debug, info, warn, error (temporarily enabled for troubleshooting)
+
+# ─── Runtime State ───────────────────────────────────────────────────────────
+
+current_profile=""
+target_profile=""
+matched_rule=""
+pending_target=""
+pending_since=0
+last_notify_time=0
+prev_cpu_total=0
+prev_cpu_idle=0
+daemon_start_time=0
+last_change_time=0
+last_change_from=""
+changes_history=()
+
+# ─── Logging ─────────────────────────────────────────────────────────────────
+
+log() {
+    local level="$1"
+    shift
+    local msg="$*"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+    case "$level" in
+        debug) [[ "$LOG_LEVEL" != "debug" ]] && return ;;
+        info)  [[ "$LOG_LEVEL" == "warn" || "$LOG_LEVEL" == "error" ]] && return ;;
+        warn)  [[ "$LOG_LEVEL" == "error" ]] && return ;;
+    esac
+
+    echo "[$timestamp] [$level] $msg" | logger -t acer-fan-profiles -p "daemon.${level}" 2>/dev/null || true
+    [[ "$LOG_LEVEL" == "debug" ]] && echo "[$timestamp] [$level] $msg" >&2 || true
+}
+
+# ─── Config Parser ───────────────────────────────────────────────────────────
+
+# Validate numeric value is within range
+# Usage: validate_numeric "field_name" "$value" min max
+validate_numeric() {
+    local field="$1" value="$2" min="$3" max="$4"
+
+    # Check if value is a valid integer
+    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+        log error "Config error: $field must be a number, got '$value'"
+        return 1
+    fi
+
+    # Check range
+    if [[ "$value" -lt "$min" || "$value" -gt "$max" ]]; then
+        log error "Config error: $field must be between $min and $max, got $value"
+        return 1
+    fi
+
+    return 0
+}
+
+# Validate all config values after loading
+validate_config() {
+    local errors=0
+
+    # Polling interval: 1-60 seconds
+    validate_numeric "polling_interval" "$POLLING_INTERVAL" 1 60 || ((errors++))
+
+    # CPU load thresholds: 0-100%
+    validate_numeric "cpu_load_low" "$CPU_LOAD_LOW" 0 100 || ((errors++))
+    validate_numeric "cpu_load_medium" "$CPU_LOAD_MEDIUM" 0 100 || ((errors++))
+    validate_numeric "cpu_load_high" "$CPU_LOAD_HIGH" 0 100 || ((errors++))
+
+    # GPU utilization: 0-100%
+    validate_numeric "gpu_util_active" "$GPU_UTIL_ACTIVE" 0 100 || ((errors++))
+
+    # Temperature thresholds: 0-120°C
+    validate_numeric "temp_elevated_trigger" "$TEMP_ELEVATED_TRIGGER" 0 120 || ((errors++))
+    validate_numeric "temp_elevated_release" "$TEMP_ELEVATED_RELEASE" 0 120 || ((errors++))
+    validate_numeric "temp_escalate_trigger" "$TEMP_ESCALATE_TRIGGER" 0 120 || ((errors++))
+    validate_numeric "temp_escalate_release" "$TEMP_ESCALATE_RELEASE" 0 120 || ((errors++))
+    validate_numeric "temp_critical_trigger" "$TEMP_CRITICAL_TRIGGER" 0 120 || ((errors++))
+    validate_numeric "temp_critical_release" "$TEMP_CRITICAL_RELEASE" 0 120 || ((errors++))
+
+    # Delays: 0-300 seconds
+    validate_numeric "upgrade_delay" "$UPGRADE_DELAY" 0 300 || ((errors++))
+    validate_numeric "downgrade_delay" "$DOWNGRADE_DELAY" 0 300 || ((errors++))
+
+    # Notify debounce: 0-600 seconds
+    validate_numeric "notify_debounce" "$NOTIFY_DEBOUNCE" 0 600 || ((errors++))
+
+    # Fan speeds per profile: 0-100%
+    validate_numeric "fan_speed_turbo" "$FAN_SPEED_TURBO" 0 100 || ((errors++))
+    validate_numeric "fan_speed_performance" "$FAN_SPEED_PERFORMANCE" 0 100 || ((errors++))
+    validate_numeric "fan_speed_balanced_performance" "$FAN_SPEED_BALANCED_PERFORMANCE" 0 100 || ((errors++))
+    validate_numeric "fan_speed_balanced" "$FAN_SPEED_BALANCED" 0 100 || ((errors++))
+    validate_numeric "fan_speed_quiet" "$FAN_SPEED_QUIET" 0 100 || ((errors++))
+    validate_numeric "fan_speed_low_power" "$FAN_SPEED_LOW_POWER" 0 100 || ((errors++))
+
+    # Logical validation: thresholds should be in ascending order
+    if [[ "$CPU_LOAD_LOW" -ge "$CPU_LOAD_MEDIUM" ]]; then
+        log warn "Config warning: cpu_load_low ($CPU_LOAD_LOW) >= cpu_load_medium ($CPU_LOAD_MEDIUM)"
+    fi
+    if [[ "$CPU_LOAD_MEDIUM" -gt "$CPU_LOAD_HIGH" ]]; then
+        log warn "Config warning: cpu_load_medium ($CPU_LOAD_MEDIUM) > cpu_load_high ($CPU_LOAD_HIGH)"
+    fi
+
+    # Thermal thresholds should be ascending
+    if [[ "$TEMP_ELEVATED_TRIGGER" -ge "$TEMP_ESCALATE_TRIGGER" ]]; then
+        log warn "Config warning: temp_elevated_trigger ($TEMP_ELEVATED_TRIGGER) >= temp_escalate_trigger ($TEMP_ESCALATE_TRIGGER)"
+    fi
+    if [[ "$TEMP_ESCALATE_TRIGGER" -ge "$TEMP_CRITICAL_TRIGGER" ]]; then
+        log warn "Config warning: temp_escalate_trigger ($TEMP_ESCALATE_TRIGGER) >= temp_critical_trigger ($TEMP_CRITICAL_TRIGGER)"
+    fi
+
+    if [[ $errors -gt 0 ]]; then
+        log error "Config validation failed with $errors error(s)"
+        return 1
+    fi
+
+    log debug "Config validation passed"
+    return 0
+}
+
+load_config() {
+    [[ ! -f "$CONFIG_FILE" ]] && return 0
+
+    log info "Loading config from $CONFIG_FILE"
+
+    while IFS=': ' read -r key value || [[ -n "$key" ]]; do
+        # Skip comments, empty lines, section headers
+        [[ -z "$key" || "$key" == \#* || "$key" == -* || "$key" == *:* && -z "$value" ]] && continue
+        key=$(echo "$key" | tr -d ' ')
+        value=$(echo "$value" | tr -d ' ' | sed 's/#.*//')
+        [[ -z "$value" ]] && continue
+
+        case "$key" in
+            polling_interval)   POLLING_INTERVAL="$value" ;;
+            cpu_load_low)       CPU_LOAD_LOW="$value" ;;
+            cpu_load_medium)    CPU_LOAD_MEDIUM="$value" ;;
+            cpu_load_high)      CPU_LOAD_HIGH="$value" ;;
+            gpu_util_active)    GPU_UTIL_ACTIVE="$value" ;;
+            # Legacy single-threshold config (backward compatibility)
+            temp_escalate)      TEMP_ESCALATE="$value"; TEMP_ESCALATE_TRIGGER="$value"; TEMP_ESCALATE_RELEASE="$value" ;;
+            temp_critical)      TEMP_CRITICAL="$value"; TEMP_CRITICAL_TRIGGER="$value"; TEMP_CRITICAL_RELEASE="$value" ;;
+            temp_elevated)      TEMP_ELEVATED="$value"; TEMP_ELEVATED_TRIGGER="$value"; TEMP_ELEVATED_RELEASE="$value" ;;
+            # New hysteresis band config (overrides legacy if present)
+            temp_elevated_trigger)  TEMP_ELEVATED_TRIGGER="$value" ;;
+            temp_elevated_release)  TEMP_ELEVATED_RELEASE="$value" ;;
+            temp_escalate_trigger)  TEMP_ESCALATE_TRIGGER="$value" ;;
+            temp_escalate_release)  TEMP_ESCALATE_RELEASE="$value" ;;
+            temp_critical_trigger)  TEMP_CRITICAL_TRIGGER="$value" ;;
+            temp_critical_release)  TEMP_CRITICAL_RELEASE="$value" ;;
+            upgrade_delay)      UPGRADE_DELAY="$value" ;;
+            downgrade_delay)    DOWNGRADE_DELAY="$value" ;;
+            notify_enabled)     NOTIFY_ENABLED="$value" ;;
+            notify_debounce)    NOTIFY_DEBOUNCE="$value" ;;
+            log_level)          LOG_LEVEL="$value" ;;
+            # Fan speeds per profile
+            fan_speed_turbo)                FAN_SPEED_TURBO="$value" ;;
+            fan_speed_performance)          FAN_SPEED_PERFORMANCE="$value" ;;
+            fan_speed_balanced_performance) FAN_SPEED_BALANCED_PERFORMANCE="$value" ;;
+            fan_speed_balanced)             FAN_SPEED_BALANCED="$value" ;;
+            fan_speed_quiet)                FAN_SPEED_QUIET="$value" ;;
+            fan_speed_low_power)            FAN_SPEED_LOW_POWER="$value" ;;
+        esac
+    done < "$CONFIG_FILE"
+
+    # Validate all loaded values
+    if ! validate_config; then
+        log error "Refusing to use invalid config, keeping previous values"
+        return 1
+    fi
+
+    log info "Config loaded: poll=${POLLING_INTERVAL}s cpu_thresholds=${CPU_LOAD_LOW}/${CPU_LOAD_MEDIUM}/${CPU_LOAD_HIGH} gpu_active=${GPU_UTIL_ACTIVE} temp_triggers=${TEMP_ELEVATED_TRIGGER}/${TEMP_ESCALATE_TRIGGER}/${TEMP_CRITICAL_TRIGGER}"
+}
+
+# ─── Sensor Readers ──────────────────────────────────────────────────────────
+
+get_cpu_load() {
+    # Read /proc/stat and compute average CPU usage percentage
+    local cpu_line
+    cpu_line=$(head -1 /proc/stat 2>/dev/null || echo "cpu 0 0 0 0 0 0 0 0")
+    local -a fields
+    read -ra fields <<< "$cpu_line"
+
+    local user="${fields[1]}"
+    local nice="${fields[2]}"
+    local system="${fields[3]}"
+    local idle="${fields[4]}"
+    local iowait="${fields[5]:-0}"
+    local irq="${fields[6]:-0}"
+    local softirq="${fields[7]:-0}"
+    local steal="${fields[8]:-0}"
+
+    local total=$((user + nice + system + idle + iowait + irq + softirq + steal))
+    local idle_total=$((idle + iowait))
+
+    if [[ "$prev_cpu_total" -gt 0 ]]; then
+        local total_diff=$((total - prev_cpu_total))
+        local idle_diff=$((idle_total - prev_cpu_idle))
+
+        if [[ "$total_diff" -gt 0 ]]; then
+            echo $(( (total_diff - idle_diff) * 100 / total_diff ))
+        else
+            echo 0
+        fi
+    else
+        echo 0
+    fi
+
+    prev_cpu_total=$total
+    prev_cpu_idle=$idle_total
+}
+
+get_gpu_util() {
+    local util
+    util=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ' || true)
+    echo "${util:-0}"
+}
+
+get_cpu_temp_raw() {
+    # Get MAXIMUM core temperature (raw reading without smoothing)
+    # This ensures we respond to hotspots (e.g., single-threaded workloads)
+    # even when average load is low
+    local max_temp=0
+    local temp
+
+    # Read all core temperatures (skip package which is temp1_input)
+    for core_temp in /sys/devices/platform/coretemp.0/hwmon/hwmon*/temp*_input; do
+        # Skip package temp (temp1_input)
+        [[ "$core_temp" =~ temp1_input ]] && continue
+
+        temp=$(cat "$core_temp" 2>/dev/null || echo "0")
+        temp=$((temp / 1000))
+
+        # Track maximum temperature
+        [[ $temp -gt $max_temp ]] && max_temp=$temp
+    done
+
+    # Return maximum, or fallback to old method if cores not found
+    if [[ $max_temp -gt 0 ]]; then
+        echo $max_temp
+    else
+        # Fallback: use package temp
+        for zone in /sys/class/thermal/thermal_zone*/; do
+            local type
+            type=$(cat "${zone}type" 2>/dev/null || echo "")
+            if [[ "$type" == "x86_pkg_temp" ]]; then
+                temp=$(cat "${zone}temp" 2>/dev/null || echo "0")
+                echo $((temp / 1000))
+                return
+            fi
+        done
+        echo "0"
+    fi
+}
+
+get_cpu_temp() {
+    # Get current raw reading
+    local current=$(get_cpu_temp_raw)
+
+    # Read temperature history from file
+    local temp_history=()
+    if [[ -f "$TEMP_HISTORY_FILE" ]]; then
+        read -ra temp_history < "$TEMP_HISTORY_FILE"
+    fi
+
+    # Add current reading, keep last 3 samples
+    temp_history+=($current)
+    if [[ ${#temp_history[@]} -gt 3 ]]; then
+        temp_history=("${temp_history[@]:(-3)}")
+    fi
+
+    # Save history back to file
+    echo "${temp_history[*]}" > "$TEMP_HISTORY_FILE"
+
+    # Calculate and return moving average
+    local sum=0 count=0
+    for t in "${temp_history[@]}"; do
+        sum=$((sum + t))
+        count=$((count + 1))
+    done
+
+    if [[ $count -gt 0 ]]; then
+        echo $((sum / count))
+    else
+        echo 0
+    fi
+}
+
+get_power_state() {
+    # Returns "ac" or "battery"
+    local online
+    online=$(cat "$POWER_SUPPLY_PATH" 2>/dev/null || echo "1")
+    [[ "$online" == "1" ]] && echo "ac" || echo "battery"
+}
+
+get_current_profile() {
+    cat "$PROFILE_PATH" 2>/dev/null || echo "balanced"
+}
+
+# ─── Linuwu-Sense Functions ───────────────────────────────────────────────────
+
+detect_linuwu_sense() {
+    if [[ -f "$LINUWU_FAN_SPEED" ]]; then
+        LINUWU_AVAILABLE=true
+        log info "Linuwu-Sense detected — direct fan control available"
+        return 0
+    fi
+    log info "Linuwu-Sense not available — using platform_profile only"
+    return 1
+}
+
+# Set fan speed (0-100 for both CPU and GPU)
+set_linuwu_fan_speed() {
+    local cpu_pct="$1"
+    local gpu_pct="$2"
+    local verify="${3:-true}"
+
+    if [[ "$LINUWU_AVAILABLE" == "true" ]]; then
+        if ! ( echo "${cpu_pct},${gpu_pct}" > "$LINUWU_FAN_SPEED" ) 2>/dev/null; then
+            log warn "Failed to write fan speed to Linuwu-Sense (permission denied or unavailable)"
+            return 1
+        fi
+        log debug "Linuwu-Sense fan speed set to ${cpu_pct},${gpu_pct}"
+
+        # Verify write took effect if requested
+        if [[ "$verify" == "true" ]]; then
+            verify_linuwu_write "$cpu_pct" "$gpu_pct" || return 1
+        fi
+
+        return 0
+    fi
+    return 1
+}
+
+# Read current Linuwu-Sense fan speed setting (validated format)
+get_linuwu_fan_speed() {
+    if [[ "$LINUWU_AVAILABLE" == "true" && -f "$LINUWU_FAN_SPEED" ]]; then
+        local speed
+        speed=$(cat "$LINUWU_FAN_SPEED" 2>/dev/null || echo "0,0")
+        # Validate format: digits,digits
+        if [[ "$speed" =~ ^[0-9]+,[0-9]+$ ]]; then
+            echo "$speed"
+        else
+            echo "0,0"
+        fi
+    else
+        echo "N/A"
+    fi
+}
+
+get_battery_percent() {
+    local capacity
+    capacity=$(cat /sys/class/power_supply/BAT1/capacity 2>/dev/null || echo "0")
+    echo "$capacity"
+}
+
+# Verify Linuwu fan speed write actually took effect
+verify_linuwu_write() {
+    local expected_cpu="$1"
+    local expected_gpu="$2"
+    local actual
+
+    # Small delay for kernel to process
+    sleep 0.1
+
+    actual=$(get_linuwu_fan_speed)
+    if [[ "$actual" == "${expected_cpu},${expected_gpu}" ]]; then
+        return 0
+    fi
+
+    log warn "Linuwu write verification failed: expected ${expected_cpu},${expected_gpu}, got ${actual}"
+    return 1
+}
+
+# ─── Profile Level Helpers ───────────────────────────────────────────────────
+
+profile_level() {
+    local profile="$1"
+    local i
+    for i in "${!PROFILES[@]}"; do
+        [[ "${PROFILES[$i]}" == "$profile" ]] && echo "$i" && return
+    done
+    echo 2  # default to balanced
+}
+
+# ─── Thermal State Management ────────────────────────────────────────────────
+
+# Read thermal states from file (explicit parsing, no source)
+# Format: elevated=true escalate=false critical=false
+read_thermal_state() {
+    local elevated=false escalate=false critical=false
+
+    if [[ -f "$THERMAL_STATE_FILE" ]]; then
+        # Parse explicitly instead of sourcing (security fix)
+        while IFS='=' read -r key value || [[ -n "$key" ]]; do
+            [[ -z "$key" || "$key" == \#* ]] && continue
+            # Only accept valid boolean values
+            [[ "$value" != "true" && "$value" != "false" ]] && continue
+            case "$key" in
+                elevated) elevated="$value" ;;
+                escalate) escalate="$value" ;;
+                critical) critical="$value" ;;
+            esac
+        done < "$THERMAL_STATE_FILE" 2>/dev/null || true
+    fi
+
+    echo "$elevated $escalate $critical"
+}
+
+# Write thermal states to file (atomic write)
+write_thermal_state() {
+    local elevated=$1 escalate=$2 critical=$3
+    local tmp_file="${THERMAL_STATE_FILE}.tmp.$$"
+
+    cat > "$tmp_file" << EOF
+elevated=$elevated
+escalate=$escalate
+critical=$critical
+EOF
+    mv "$tmp_file" "$THERMAL_STATE_FILE"
+}
+
+# ─── Decision Engine ─────────────────────────────────────────────────────────
+
+evaluate_rules() {
+    local cpu_load="$1"
+    local gpu_util="$2"
+    local cpu_temp="$3"
+    local power="$4"
+
+    # Read thermal states (with hysteresis bands)
+    local thermal_states
+    thermal_states=($(read_thermal_state))
+    local thermal_elevated=${thermal_states[0]}
+    local thermal_escalate=${thermal_states[1]}
+    local thermal_critical=${thermal_states[2]}
+
+    # Priority 1: Thermal emergency with hysteresis bands
+    # Use turbo if Linuwu-Sense available for maximum cooling
+    local max_profile="performance"
+    [[ "$LINUWU_AVAILABLE" == "true" ]] && max_profile="turbo"
+
+    # Critical thermal (highest priority)
+    if $thermal_critical; then
+        # Already active - check release threshold
+        if [[ $cpu_temp -lt $TEMP_CRITICAL_RELEASE ]]; then
+            thermal_critical=false
+            log debug "Thermal critical deactivated (temp ${cpu_temp}°C < release ${TEMP_CRITICAL_RELEASE}°C)"
+        fi
+    else
+        # Not active - check trigger threshold
+        if [[ $cpu_temp -ge $TEMP_CRITICAL_TRIGGER ]]; then
+            thermal_critical=true
+            log info "Thermal critical activated (temp ${cpu_temp}°C >= trigger ${TEMP_CRITICAL_TRIGGER}°C)"
+        fi
+    fi
+
+    if $thermal_critical; then
+        write_thermal_state "$thermal_elevated" "$thermal_escalate" "$thermal_critical"
+        echo "${max_profile}|thermal_critical|CPU at ${cpu_temp}C - emergency max cooling"
+        return
+    fi
+
+    # Escalate thermal
+    if $thermal_escalate; then
+        # Already active - check release threshold
+        if [[ $cpu_temp -lt $TEMP_ESCALATE_RELEASE ]]; then
+            thermal_escalate=false
+            log debug "Thermal escalate deactivated (temp ${cpu_temp}°C < release ${TEMP_ESCALATE_RELEASE}°C)"
+        fi
+    else
+        # Not active - check trigger threshold
+        if [[ $cpu_temp -ge $TEMP_ESCALATE_TRIGGER ]]; then
+            thermal_escalate=true
+            log info "Thermal escalate activated (temp ${cpu_temp}°C >= trigger ${TEMP_ESCALATE_TRIGGER}°C)"
+        fi
+    fi
+
+    if $thermal_escalate; then
+        write_thermal_state "$thermal_elevated" "$thermal_escalate" "$thermal_critical"
+        echo "${max_profile}|thermal_escalate|CPU at ${cpu_temp}C - escalating"
+        return
+    fi
+
+    # Elevated thermal (performance profile)
+    if $thermal_elevated; then
+        # Already active - check release threshold
+        if [[ $cpu_temp -lt $TEMP_ELEVATED_RELEASE ]]; then
+            thermal_elevated=false
+            log debug "Thermal elevated deactivated (temp ${cpu_temp}°C < release ${TEMP_ELEVATED_RELEASE}°C)"
+        fi
+    else
+        # Not active - check trigger threshold
+        if [[ $cpu_temp -ge $TEMP_ELEVATED_TRIGGER ]]; then
+            thermal_elevated=true
+            log info "Thermal elevated activated (temp ${cpu_temp}°C >= trigger ${TEMP_ELEVATED_TRIGGER}°C)"
+        fi
+    fi
+
+    if $thermal_elevated; then
+        write_thermal_state "$thermal_elevated" "$thermal_escalate" "$thermal_critical"
+        echo "performance|thermal_elevated|CPU at ${cpu_temp}C - elevated thermal response"
+        return
+    fi
+
+    # No thermal rules active - save clean state
+    write_thermal_state false false false
+
+    # Priority 2: Battery rules
+    if [[ "$power" == "battery" ]]; then
+        if [[ $cpu_load -lt $CPU_LOAD_LOW && $gpu_util -lt $GPU_UTIL_ACTIVE ]]; then
+            echo "low-power|battery_idle|Battery + idle"
+            return
+        fi
+        echo "quiet|battery_active|Battery + load (CPU ${cpu_load}% GPU ${gpu_util}%)"
+        return
+    fi
+
+    # Priority 3: AC rules
+    if [[ $cpu_load -lt $CPU_LOAD_LOW && $gpu_util -lt $GPU_UTIL_ACTIVE ]]; then
+        echo "quiet|ac_idle|AC + idle"
+        return
+    fi
+
+    if [[ $cpu_load -lt $CPU_LOAD_MEDIUM && $gpu_util -lt $GPU_UTIL_ACTIVE ]]; then
+        echo "balanced|ac_light|AC + light load (CPU ${cpu_load}%)"
+        return
+    fi
+
+    if [[ $cpu_load -lt $CPU_LOAD_HIGH && $gpu_util -lt $GPU_UTIL_ACTIVE ]]; then
+        echo "balanced-performance|ac_medium|AC + medium load (CPU ${cpu_load}%)"
+        return
+    fi
+
+    # Use turbo for heavy AC load if Linuwu-Sense available
+    if [[ "$LINUWU_AVAILABLE" == "true" ]]; then
+        echo "turbo|ac_heavy|AC + heavy load (CPU ${cpu_load}% GPU ${gpu_util}%)"
+    else
+        echo "performance|ac_heavy|AC + heavy load (CPU ${cpu_load}% GPU ${gpu_util}%)"
+    fi
+}
+
+# ─── Hysteresis ──────────────────────────────────────────────────────────────
+
+# Read hysteresis state from file (explicit parsing, no source)
+read_hysteresis_state() {
+    local _pending_target="" _pending_since=0
+
+    if [[ -f "$HYSTERESIS_STATE_FILE" ]]; then
+        while IFS='=' read -r key value || [[ -n "$key" ]]; do
+            [[ -z "$key" || "$key" == \#* ]] && continue
+            # Strip quotes from value
+            value="${value//\'/}"
+            case "$key" in
+                pending_target) _pending_target="$value" ;;
+                pending_since) [[ "$value" =~ ^[0-9]+$ ]] && _pending_since="$value" ;;
+            esac
+        done < "$HYSTERESIS_STATE_FILE" 2>/dev/null || true
+    fi
+
+    echo "$_pending_target|$_pending_since"
+}
+
+# Write hysteresis state to file (atomic write)
+write_hysteresis_state() {
+    local target="$1" since="$2"
+    local tmp_file="${HYSTERESIS_STATE_FILE}.tmp.$$"
+
+    cat > "$tmp_file" << EOF
+pending_target='$target'
+pending_since=$since
+EOF
+    mv "$tmp_file" "$HYSTERESIS_STATE_FILE"
+}
+
+apply_hysteresis() {
+    local new_target="$1"
+    local rule="$2"
+    local now
+    now=$(date +%s)
+
+    # Read persisted hysteresis state from file (survives subshell calls)
+    local pending_target="" pending_since=0
+    local hysteresis_data
+    hysteresis_data=$(read_hysteresis_state)
+    pending_target="${hysteresis_data%%|*}"
+    pending_since="${hysteresis_data##*|}"
+
+    log debug "apply_hysteresis: new_target=$new_target rule=$rule current_profile=$current_profile pending_target=$pending_target"
+
+    # Thermal rules bypass hysteresis (instant response to temperature changes)
+    # BUT: Only clear pending timer if thermal rule requires UPGRADE
+    # If thermal rule matches current profile or would downgrade, preserve timer
+    if [[ "$rule" == thermal_* ]]; then
+        local thermal_level
+        thermal_level=$(profile_level "$new_target")
+        local current_level
+        current_level=$(profile_level "$current_profile")
+
+        if [[ $thermal_level -gt $current_level ]]; then
+            # Thermal emergency - UPGRADE needed, clear pending downgrade
+            write_hysteresis_state "" 0
+            log debug "  → Thermal UPGRADE, bypassing hysteresis, returning $new_target"
+        else
+            # Thermal rule doesn't require upgrade - preserve any pending timer
+            log debug "  → Thermal rule at/below current level, preserving timer state"
+        fi
+        echo "$new_target"
+        return
+    fi
+
+    local current_level
+    current_level=$(profile_level "$current_profile")
+    local new_level
+    new_level=$(profile_level "$new_target")
+
+    # Same profile — reset pending
+    if [[ "$new_target" == "$current_profile" ]]; then
+        # Clear hysteresis state
+        write_hysteresis_state "" 0
+        log debug "  → Same as current, returning $current_profile"
+        echo "$current_profile"
+        return
+    fi
+
+    # Different target than pending — check if we should reset timer
+    if [[ "$new_target" != "$pending_target" ]]; then
+        log debug "  → Target differs from pending (pending=$pending_target)"
+        local pending_level=0
+        [[ -n "$pending_target" ]] && pending_level=$(profile_level "$pending_target")
+
+        # Determine direction of pending and new targets
+        local pending_dir=0 new_dir=0
+        [[ $pending_level -gt $current_level ]] && pending_dir=1   # upgrading
+        [[ $pending_level -lt $current_level ]] && pending_dir=-1  # downgrading
+        [[ $new_level -gt $current_level ]] && new_dir=1
+        [[ $new_level -lt $current_level ]] && new_dir=-1
+
+        # Only reset timer if direction changes (upgrade <-> downgrade)
+        # If same direction, just update target without resetting timer
+        if [[ -z "$pending_target" ]] || [[ $pending_dir -ne $new_dir ]]; then
+            # No pending or direction changed — start fresh
+            write_hysteresis_state "$new_target" "$now"
+            log debug "  → Started new timer: pending=$new_target since=$now"
+        else
+            # Same direction — keep timer, update target
+            write_hysteresis_state "$new_target" "$pending_since"
+            log debug "  → Updated target to $new_target without timer reset"
+        fi
+        log debug "  → Returning current_profile=$current_profile (timer running)"
+        echo "$current_profile"
+        return
+    fi
+
+    # Same pending target — check if delay elapsed
+    local delay
+    if [[ $new_level -gt $current_level ]]; then
+        delay=$UPGRADE_DELAY
+    else
+        delay=$DOWNGRADE_DELAY
+    fi
+
+    local elapsed=$((now - pending_since))
+    log debug "  → Timer check: elapsed=${elapsed}s delay=${delay}s (pending=$pending_target)"
+    if [[ $elapsed -ge $delay ]]; then
+        # Clear hysteresis state - timer complete
+        write_hysteresis_state "" 0
+        log debug "  → Timer complete! Returning new_target=$new_target"
+        echo "$new_target"
+    else
+        log debug "  → Timer still running, returning current_profile=$current_profile"
+        echo "$current_profile"
+    fi
+}
+
+# ─── Profile Setter ──────────────────────────────────────────────────────────
+
+set_profile() {
+    local profile="$1"
+    local rule="$2"
+    local reason="$3"
+
+    local same_profile=false
+    [[ "$profile" == "$current_profile" ]] && same_profile=true
+
+    local old_profile="$current_profile"
+    local fan_write_ok=false
+
+    # Handle profile setting based on Linuwu-Sense availability
+    if [[ "$LINUWU_AVAILABLE" == "true" ]]; then
+        # Use Linuwu-Sense direct fan control
+        local fan_cpu fan_gpu
+        case "$profile" in
+            turbo)                fan_cpu=$FAN_SPEED_TURBO;                fan_gpu=$FAN_SPEED_TURBO ;;
+            performance)          fan_cpu=$FAN_SPEED_PERFORMANCE;          fan_gpu=$FAN_SPEED_PERFORMANCE ;;
+            balanced-performance) fan_cpu=$FAN_SPEED_BALANCED_PERFORMANCE; fan_gpu=$FAN_SPEED_BALANCED_PERFORMANCE ;;
+            balanced)             fan_cpu=$FAN_SPEED_BALANCED;             fan_gpu=$FAN_SPEED_BALANCED ;;
+            quiet)                fan_cpu=$FAN_SPEED_QUIET;                fan_gpu=$FAN_SPEED_QUIET ;;
+            low-power)            fan_cpu=$FAN_SPEED_LOW_POWER;            fan_gpu=$FAN_SPEED_LOW_POWER ;;  # Auto/minimal
+        esac
+
+        # FIRST: Set platform_profile via ACPI (turbo maps to performance)
+        local platform_profile="$profile"
+        [[ "$profile" == "turbo" ]] && platform_profile="performance"
+        echo "$platform_profile" > "$PROFILE_PATH" 2>/dev/null || true
+
+        # Wait for ACPI to settle before writing Linuwu fan speed
+        sleep 0.5
+
+        # LAST: Set fan speed via Linuwu-Sense (after ACPI, so it isn't reset)
+        if set_linuwu_fan_speed "$fan_cpu" "$fan_gpu"; then
+            fan_write_ok=true
+            log debug "Fan speed set to ${fan_cpu},${fan_gpu}"
+        else
+            log warn "Failed to set Linuwu fan speed to ${fan_cpu},${fan_gpu}"
+        fi
+    else
+        # Fallback to platform_profile only (turbo not available)
+        if [[ "$profile" == "turbo" ]]; then
+            log warn "Turbo profile requires Linuwu-Sense — falling back to performance"
+            profile="performance"
+        fi
+        if echo "$profile" > "$PROFILE_PATH" 2>/dev/null; then
+            fan_write_ok=true
+        else
+            log error "Failed to write profile '$profile' to $PROFILE_PATH"
+            return 1
+        fi
+    fi
+
+    # Only update state if at least one write succeeded
+    if [[ "$fan_write_ok" == "true" ]]; then
+        current_profile="$profile"
+
+        # Skip notification/logging/history if profile didn't actually change
+        # (fan speed was still re-asserted above)
+        if [[ "$same_profile" == "true" ]]; then
+            log debug "Profile $profile re-asserted (fan speed refreshed)"
+            return 0
+        fi
+
+        last_change_time=$(date +%s)
+        last_change_from="$old_profile"
+
+        # Track history (keep last 10)
+        local entry
+        entry="$(date '+%H:%M:%S') ${old_profile} -> ${profile} (${rule})"
+        changes_history=("$entry" "${changes_history[@]}")
+        [[ ${#changes_history[@]} -gt 10 ]] && changes_history=("${changes_history[@]:0:10}")
+
+        log info "Profile changed: $old_profile -> $profile ($rule: $reason)"
+        send_notification "$profile" "$rule" "$reason"
+    else
+        log warn "Profile change to $profile failed - keeping current profile $current_profile"
+    fi
+}
+
+# ─── Desktop Notifications ───────────────────────────────────────────────────
+
+send_notification() {
+    [[ "$NOTIFY_ENABLED" != "true" ]] && return 0
+
+    local profile="$1"
+    local rule="$2"
+    local reason="$3"
+    local now
+    now=$(date +%s)
+
+    # Debounce
+    local elapsed=$((now - last_notify_time))
+    [[ $elapsed -lt $NOTIFY_DEBOUNCE ]] && return 0
+    last_notify_time=$now
+
+    local icon urgency summary
+    case "$profile" in
+        low-power)              icon="battery-low-symbolic";      urgency="low" ;;
+        quiet)                  icon="audio-volume-low-symbolic";  urgency="low" ;;
+        balanced)               icon="power-profile-balanced-symbolic"; urgency="normal" ;;
+        balanced-performance)   icon="power-profile-performance-symbolic"; urgency="normal" ;;
+        performance)            icon="power-profile-performance-symbolic"; urgency="normal" ;;
+        turbo)                  icon="dialog-warning-symbolic";   urgency="critical" ;;
+    esac
+
+    summary="Fan Profile: ${profile}"
+    [[ "$rule" == thermal_critical ]] && urgency="critical"
+
+    # Use sudo -u to send as the desktop user if running as root
+    local display_user
+    display_user=$(who | grep -oP '^\S+' | head -1 || true)
+    if [[ -n "$display_user" ]]; then
+        sudo -u "$display_user" DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$display_user")/bus" \
+            notify-send -i "$icon" -u "$urgency" "$summary" "$reason" 2>/dev/null || true
+    fi
+}
+
+# ─── State File (for CLI) ───────────────────────────────────────────────────
+
+read_fan_value() {
+    local name="$1"
+    local d f val candidate val_candidate rp
+
+    # 1) Prefer hwmon with explicit name 'acer' and return non-zero values first
+    for d in /sys/class/hwmon/hwmon*; do
+        [[ -f "${d}/name" ]] || continue
+        if grep -qi '^acer$' "${d}/name" 2>/dev/null; then
+            [[ -f "${d}/${name}" ]] || continue
+            val=$(cat "${d}/${name}" 2>/dev/null || echo 0)
+            log info "read_fan_value: found acer hwmon ${d}/${name} val=${val}"
+            [[ "${val}" -gt 0 ]] && { echo "${val}"; return; } || { candidate="${d}/${name}"; val_candidate="${val}"; }
+        fi
+    done
+
+    # 2) Check platform-specific hwmon entries (prefer non-zero)
+    for f in /sys/devices/platform/acer-wmi/hwmon/hwmon*/${name}; do
+        [[ -f "$f" ]] || continue
+        val=$(cat "$f" 2>/dev/null || echo 0)
+        log info "read_fan_value: checking $f val=${val}"
+        [[ "${val}" -gt 0 ]] && { echo "${val}"; return; }
+        [[ -z "$candidate" ]] && { candidate="$f"; val_candidate="$val"; }
+    done
+
+    # 3) Honor HWMON_DIR if set
+    if [[ -n "${HWMON_DIR:-}" && -f "${HWMON_DIR}/${name}" ]]; then
+        val=$(cat "${HWMON_DIR}/${name}" 2>/dev/null || echo 0)
+        log info "read_fan_value: HWMON_DIR ${HWMON_DIR}/${name} val=${val}"
+        [[ "${val}" -gt 0 ]] && { echo "${val}"; return; } || { [[ -z "$candidate" ]] && { candidate="${HWMON_DIR}/${name}"; val_candidate="$val"; } }
+    fi
+
+    # 4) Fallback: any hwmon whose resolved path contains 'acer-wmi' (prefer non-zero)
+    for d in /sys/class/hwmon/hwmon*; do
+        rp=$(readlink -f "$d" 2>/dev/null || true)
+        [[ -n "$rp" && "$rp" == *acer-wmi* && -f "${d}/${name}" ]] || continue
+        val=$(cat "${d}/${name}" 2>/dev/null || echo 0)
+        log info "read_fan_value: checking ${d}/${name} rp=${rp} val=${val}"
+        [[ "${val}" -gt 0 ]] && { echo "${val}"; return; }
+        [[ -z "$candidate" ]] && { candidate="${d}/${name}"; val_candidate="$val"; }
+    done
+
+    # If we found a candidate, return its value (even if zero)
+    if [[ -n "$candidate" ]]; then
+        log info "read_fan_value: returning candidate $candidate val=${val_candidate}"
+        echo "$val_candidate"
+        return
+    fi
+
+    echo "0"
+}
+
+write_state() {
+    local cpu_load="$1"
+    local gpu_util="$2"
+    local cpu_temp="$3"
+    local power="$4"
+    local rule="$5"
+    local reason="$6"
+
+    local mode="auto"
+    [[ -f "$OVERRIDE_FILE" ]] && mode="manual"
+
+    local now
+    now=$(date +%s)
+    local uptime_secs=$((now - daemon_start_time))
+    local change_ago=""
+    [[ $last_change_time -gt 0 ]] && change_ago=$((now - last_change_time))
+
+    local battery_pct
+    battery_pct=$(get_battery_percent)
+
+    local fan1 fan2
+    # Read fan sensors using helper (robust across hwmon indices)
+    fan1=$(read_fan_value fan1_input)
+    fan2=$(read_fan_value fan2_input)
+
+    # Build history JSON array
+    local history_json="["
+    local first=true
+    for entry in "${changes_history[@]}"; do
+        [[ "$first" == "true" ]] && first=false || history_json+=","
+        history_json+="\"$entry\""
+    done
+    history_json+="]"
+
+    # Get Linuwu-Sense fan speed setting if available
+    local linuwu_speed linuwu_json_bool
+    linuwu_speed=$(get_linuwu_fan_speed)
+    # Explicit JSON boolean (not shell string)
+    linuwu_json_bool="false"
+    [[ "$LINUWU_AVAILABLE" == "true" ]] && linuwu_json_bool="true"
+
+    cat > "$STATE_FILE" << EOJSON
+{
+  "version": "$VERSION",
+  "profile": "$current_profile",
+  "mode": "$mode",
+  "rule": "$rule",
+  "reason": "$reason",
+  "power": "$power",
+  "battery_pct": $battery_pct,
+  "cpu_load": $cpu_load,
+  "gpu_util": $gpu_util,
+  "cpu_temp": $cpu_temp,
+  "fan1_rpm": $fan1,
+  "fan2_rpm": $fan2,
+  "linuwu_available": $linuwu_json_bool,
+  "linuwu_fan_speed": "${linuwu_speed}",
+  "uptime_secs": $uptime_secs,
+  "last_change_ago": ${change_ago:-null},
+  "last_change_from": "${last_change_from:-null}",
+  "history": $history_json,
+  "config": {
+    "polling_interval": $POLLING_INTERVAL,
+    "cpu_load_low": $CPU_LOAD_LOW,
+    "cpu_load_medium": $CPU_LOAD_MEDIUM,
+    "cpu_load_high": $CPU_LOAD_HIGH,
+    "gpu_util_active": $GPU_UTIL_ACTIVE,
+    "temp_elevated_trigger": $TEMP_ELEVATED_TRIGGER,
+    "temp_elevated_release": $TEMP_ELEVATED_RELEASE,
+    "temp_escalate_trigger": $TEMP_ESCALATE_TRIGGER,
+    "temp_escalate_release": $TEMP_ESCALATE_RELEASE,
+    "temp_critical_trigger": $TEMP_CRITICAL_TRIGGER,
+    "temp_critical_release": $TEMP_CRITICAL_RELEASE,
+    "upgrade_delay": $UPGRADE_DELAY,
+    "downgrade_delay": $DOWNGRADE_DELAY
+  }
+}
+EOJSON
+}
+
+# ─── Manual Override ─────────────────────────────────────────────────────────
+
+check_override() {
+    if [[ -f "$OVERRIDE_FILE" ]]; then
+        local override_profile
+        override_profile=$(cat "$OVERRIDE_FILE" 2>/dev/null || echo "")
+        if [[ -n "$override_profile" ]]; then
+            echo "$override_profile"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# ─── Signal Handlers ─────────────────────────────────────────────────────────
+
+reload_handler() {
+    log info "Received SIGHUP — reloading configuration"
+    load_config
+}
+
+shutdown_handler() {
+    log info "Received shutdown signal — cleaning up"
+    rm -f "$PID_FILE" || true
+    exit 0
+}
+
+# ─── Initialization ─────────────────────────────────────────────────────────
+
+init() {
+    # Verify platform_profile exists
+    if [[ ! -f "$PROFILE_PATH" ]]; then
+        log error "Platform profile not found at $PROFILE_PATH"
+        log error "Is acer_wmi.predator_v4=1 kernel parameter set?"
+        exit 1
+    fi
+
+    # Detect Linuwu-Sense availability
+    detect_linuwu_sense || true
+
+    # Create state directory
+    mkdir -p "$STATE_DIR"
+    chmod 755 "$STATE_DIR"
+
+    # Create config directory if needed
+    mkdir -p "$CONFIG_DIR"
+
+    # Write PID
+    echo $$ > "$PID_FILE"
+
+    # Load config
+    load_config
+
+    # Detect acer hwmon directory (index may vary between systems)
+    HWMON_DIR=""
+    # Prefer explicit match by 'acer' name
+    HWMON_DIR=$(grep -l -i '^acer$' /sys/class/hwmon/hwmon*/name 2>/dev/null | head -n1 || true)
+    if [[ -n "$HWMON_DIR" ]]; then
+        HWMON_DIR=$(dirname "$HWMON_DIR")
+    else
+        HWMON_DIR=$(grep -l -i '^acer$' /sys/devices/platform/acer-wmi/hwmon/hwmon*/name 2>/dev/null | head -n1 || true)
+        [[ -n "$HWMON_DIR" ]] && HWMON_DIR=$(dirname "$HWMON_DIR")
+    fi
+    # Fallback to any platform hwmon directory
+    [[ -z "$HWMON_DIR" ]] && HWMON_DIR=$(ls -d /sys/devices/platform/acer-wmi/hwmon/hwmon* 2>/dev/null | head -n1 || true)
+    # No hardcoded fallback - read_fan_value() has its own wildcard logic
+
+    # Write detection debug info for troubleshooting
+    mkdir -p "$STATE_DIR"
+    echo "grep-class: $(grep -l -i '^acer$' /sys/class/hwmon/hwmon*/name 2>/dev/null || true)" > "$STATE_DIR/hwmon-detect.log" 2>/dev/null || true
+    echo "grep-platform: $(grep -l -i '^acer$' /sys/devices/platform/acer-wmi/hwmon/hwmon*/name 2>/dev/null || true)" >> "$STATE_DIR/hwmon-detect.log" 2>/dev/null || true
+    echo "ls-platform: $(ls -d /sys/devices/platform/acer-wmi/hwmon/hwmon* 2>/dev/null | tr '\n' ' ' )" >> "$STATE_DIR/hwmon-detect.log" 2>/dev/null || true
+    echo "HWMON_DIR=${HWMON_DIR}" >> "$STATE_DIR/hwmon-detect.log" 2>/dev/null || true
+
+    log info "Using hwmon directory: ${HWMON_DIR}"
+
+    # Get initial state
+    current_profile=$(get_current_profile)
+    daemon_start_time=$(date +%s)
+
+    # Seed CPU load calculation (needs 2 readings)
+    get_cpu_load > /dev/null
+
+    # Set up signal handlers
+    trap reload_handler SIGHUP
+    trap shutdown_handler SIGTERM SIGINT
+
+    log info "acer-fan-profiles v${VERSION} started"
+    log info "Current profile: $current_profile"
+    log info "Available profiles: ${PROFILES[*]}"
+}
+
+# ─── Main Loop ───────────────────────────────────────────────────────────────
+
+main_loop() {
+    FIRST_ITERATION=true
+    while true; do
+        # Read sensors
+        local cpu_load gpu_util cpu_temp power
+        cpu_load=$(get_cpu_load)
+        gpu_util=$(get_gpu_util)
+        cpu_temp=$(get_cpu_temp)
+        power=$(get_power_state)
+
+        log debug "Sensors: cpu=${cpu_load}% gpu=${gpu_util}% temp=${cpu_temp}C power=${power} profile=${current_profile}"
+
+        # Sync with actual system profile (detect external changes from system76-power, etc.)
+        # Skip in cooperative mode since we intentionally diverge from platform_profile
+        if [[ "$COOPERATIVE_MODE" != "true" ]]; then
+            local actual_profile
+            actual_profile=$(get_current_profile)
+            if [[ "$actual_profile" != "$current_profile" ]]; then
+                log info "External profile change detected: $current_profile -> $actual_profile"
+                current_profile="$actual_profile"
+                # Reset hysteresis when external change detected
+                write_hysteresis_state "" 0
+            fi
+        fi
+
+        local rule="" reason="" final_profile=""
+
+        # Check manual override first
+        local override
+        if override=$(check_override); then
+            final_profile="$override"
+            rule="manual_override"
+            reason="Manual override: $override"
+            log debug "Manual override active: $override"
+        else
+            # Evaluate rules
+            local result
+            result=$(evaluate_rules "$cpu_load" "$gpu_util" "$cpu_temp" "$power")
+            local target
+            target=$(echo "$result" | cut -d'|' -f1)
+            rule=$(echo "$result" | cut -d'|' -f2)
+            reason=$(echo "$result" | cut -d'|' -f3)
+
+            log debug "evaluate_rules returned: target=$target rule=$rule reason=$reason"
+
+            # Apply hysteresis
+            final_profile=$(apply_hysteresis "$target" "$rule")
+            log debug "apply_hysteresis returned: final_profile=$final_profile"
+        fi
+
+        # Apply profile change if needed (force write on first iteration to avoid stale sysfs)
+        log debug "Profile check: final=$final_profile current=$current_profile first_iteration=$FIRST_ITERATION"
+        if [[ "$final_profile" != "$current_profile" ]] || [[ "$FIRST_ITERATION" == "true" ]]; then
+            if [[ "$COOPERATIVE_MODE" == "true" && "$LINUWU_AVAILABLE" == "true" ]]; then
+                # Cooperative mode: only adjust Linuwu fan speed, respect system76-power's profile
+                # Exception: thermal emergencies override everything
+                if [[ "$rule" == thermal_critical || "$rule" == thermal_escalate ]]; then
+                    set_profile "$final_profile" "$rule" "$reason"
+                else
+                    # Just adjust fan speed based on our calculated profile, don't change platform_profile
+                    # Check if transitioning from thermal emergency state
+                    local from_thermal=false
+                    if [[ "$current_profile" == "turbo" || "$current_profile" == "performance" ]]; then
+                        local current_fan_speed
+                        current_fan_speed=$(get_linuwu_fan_speed)
+                        if [[ "$current_fan_speed" == "100,100" ]]; then
+                            from_thermal=true
+                            log info "Cooperative mode: transitioning from thermal emergency state"
+                        fi
+                    fi
+
+                    local fan_cpu fan_gpu
+                    case "$final_profile" in
+                        turbo)                fan_cpu=$FAN_SPEED_TURBO;                fan_gpu=$FAN_SPEED_TURBO ;;
+                        performance)          fan_cpu=$FAN_SPEED_PERFORMANCE;          fan_gpu=$FAN_SPEED_PERFORMANCE ;;
+                        balanced-performance) fan_cpu=$FAN_SPEED_BALANCED_PERFORMANCE; fan_gpu=$FAN_SPEED_BALANCED_PERFORMANCE ;;
+                        balanced)             fan_cpu=$FAN_SPEED_BALANCED;             fan_gpu=$FAN_SPEED_BALANCED ;;
+                        quiet)                fan_cpu=$FAN_SPEED_QUIET;                fan_gpu=$FAN_SPEED_QUIET ;;
+                        low-power)            fan_cpu=$FAN_SPEED_LOW_POWER;            fan_gpu=$FAN_SPEED_LOW_POWER ;;  # Auto/minimal
+                    esac
+
+                    log info "Cooperative mode: attempting fan speed ${fan_cpu},${fan_gpu} for ${final_profile} (${rule})"
+                    if set_linuwu_fan_speed "$fan_cpu" "$fan_gpu" true; then
+                        log info "Cooperative mode: fan speed set successfully"
+                        # Only update tracked profile if write succeeded AND verification passed
+                        current_profile="$final_profile"
+                    else
+                        log warn "Cooperative mode: failed to set fan speed (write or verification failed)"
+
+                        # Special diagnostic for thermal-to-normal transitions
+                        if [[ "$from_thermal" == "true" ]]; then
+                            log warn "Cooperative mode: thermal downgrade blocked - EC may be holding fan control. Will retry."
+                        fi
+
+                        # Critical: Do NOT update current_profile on failure - ensures retry on next iteration
+                    fi
+                fi
+            else
+                # Non-cooperative mode: manage everything
+                set_profile "$final_profile" "$rule" "$reason"
+            fi
+            FIRST_ITERATION=false
+        fi
+
+        matched_rule="$rule"
+
+        # Write state for CLI
+        write_state "$cpu_load" "$gpu_util" "$cpu_temp" "$power" "$rule" "$reason"
+
+        sleep "$POLLING_INTERVAL"
+    done
+}
+
+# ─── Entry Point ─────────────────────────────────────────────────────────────
+
+init
+main_loop

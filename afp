@@ -1,0 +1,371 @@
+#!/bin/bash
+# afp — CLI for acer-fan-profiles daemon
+# Usage: afp [status|set|auto|profiles|monitor|config|reload]
+
+set -euo pipefail
+
+readonly STATE_FILE="/run/acer-fan-profiles/state.json"
+readonly OVERRIDE_FILE="/run/acer-fan-profiles/override"
+readonly PID_FILE="/run/acer-fan-profiles/daemon.pid"
+readonly CONFIG_FILE="${HOME}/.config/acer-fan-profiles/config.yaml"
+readonly PROFILE_PATH="/sys/firmware/acpi/platform_profile"
+readonly LINUWU_FAN_SPEED="/sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense/fan_speed"
+readonly PROFILES=("low-power" "quiet" "balanced" "balanced-performance" "performance" "turbo")
+
+# ─── Colors ──────────────────────────────────────────────────────────────────
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+is_daemon_running() {
+    # Try PID file first, then fall back to systemctl
+    if [[ -f "$PID_FILE" ]]; then
+        kill -0 "$(cat "$PID_FILE")" 2>/dev/null && return 0
+    fi
+    # Fallback: check systemctl (daemon runs as root, user can't signal it)
+    systemctl is-active --quiet acer-fan-profiles 2>/dev/null
+}
+
+read_state() {
+    [[ -f "$STATE_FILE" ]] && cat "$STATE_FILE" || echo "{}"
+}
+
+json_field() {
+    local json="$1" field="$2"
+    echo "$json" | grep -oP "\"${field}\"\s*:\s*\K[^\",}]+" | head -1 || echo ""
+}
+
+json_field_str() {
+    local json="$1" field="$2"
+    echo "$json" | grep -oP "\"${field}\"\s*:\s*\"\K[^\"]*" | head -1 || echo ""
+}
+
+format_duration() {
+    local secs="$1"
+    [[ -z "$secs" || "$secs" == "null" ]] && echo "never" && return
+    if [[ $secs -lt 60 ]]; then
+        echo "${secs}s ago"
+    elif [[ $secs -lt 3600 ]]; then
+        echo "$((secs / 60))m ago"
+    else
+        echo "$((secs / 3600))h $((secs % 3600 / 60))m ago"
+    fi
+}
+
+bar() {
+    local value="$1" max="$2" width="${3:-20}"
+    local filled=$((value * width / max))
+    [[ $filled -gt $width ]] && filled=$width
+    local empty=$((width - filled))
+    local color="$GREEN"
+    [[ $value -ge 70 ]] && color="$YELLOW"
+    [[ $value -ge 90 ]] && color="$RED"
+    printf "${color}"
+    printf '%0.s█' $(seq 1 $filled 2>/dev/null) || true
+    printf "${DIM}"
+    printf '%0.s░' $(seq 1 $empty 2>/dev/null) || true
+    printf "${RESET}"
+}
+
+profile_color() {
+    local profile="$1"
+    case "$profile" in
+        low-power)              echo "$BLUE" ;;
+        quiet)                  echo "$CYAN" ;;
+        balanced)               echo "$GREEN" ;;
+        balanced-performance)   echo "$YELLOW" ;;
+        performance)            echo "$RED" ;;
+        turbo)                  echo "$RED" ;;
+        *)                      echo "$RESET" ;;
+    esac
+}
+
+# ─── Commands ────────────────────────────────────────────────────────────────
+
+cmd_status() {
+    local json
+    json=$(read_state)
+
+    if [[ "$json" == "{}" ]]; then
+        echo -e "${YELLOW}Daemon not running or no state available.${RESET}"
+        echo ""
+        echo "Current profile: $(cat "$PROFILE_PATH" 2>/dev/null || echo "unknown")"
+        return 1
+    fi
+
+    # Handle --json flag
+    if [[ "${1:-}" == "--json" ]]; then
+        echo "$json"
+        return 0
+    fi
+
+    local profile mode rule reason power battery cpu_load gpu_util cpu_temp
+    local fan1 fan2 uptime_secs change_ago change_from linuwu_available linuwu_speed
+
+    profile=$(json_field_str "$json" "profile")
+    mode=$(json_field_str "$json" "mode")
+    rule=$(json_field_str "$json" "rule")
+    reason=$(json_field_str "$json" "reason")
+    power=$(json_field_str "$json" "power")
+    battery=$(json_field "$json" "battery_pct")
+    cpu_load=$(json_field "$json" "cpu_load")
+    gpu_util=$(json_field "$json" "gpu_util")
+    cpu_temp=$(json_field "$json" "cpu_temp")
+    fan1=$(json_field "$json" "fan1_rpm")
+    fan2=$(json_field "$json" "fan2_rpm")
+    linuwu_available=$(json_field "$json" "linuwu_available")
+    linuwu_speed=$(json_field_str "$json" "linuwu_fan_speed")
+    uptime_secs=$(json_field "$json" "uptime_secs")
+    change_ago=$(json_field "$json" "last_change_ago")
+    change_from=$(json_field_str "$json" "last_change_from")
+
+    local pcolor
+    pcolor=$(profile_color "$profile")
+
+    # Format Linuwu-Sense status
+    local linuwu_status
+    if [[ "$linuwu_available" == "true" ]]; then
+        linuwu_status="${GREEN}active${RESET} (fan: ${linuwu_speed:-auto})"
+    else
+        linuwu_status="${DIM}not available${RESET}"
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Profile:${RESET}    ${pcolor}${BOLD}${profile}${RESET}"
+    echo -e "  ${BOLD}Mode:${RESET}       ${mode}"
+    echo -e "  ${BOLD}Rule:${RESET}       ${rule} ${DIM}(${reason})${RESET}"
+    echo -e "  ${BOLD}Linuwu:${RESET}     ${linuwu_status}"
+    echo ""
+    echo -e "  ${BOLD}Power:${RESET}      ${power} ${DIM}(battery ${battery}%)${RESET}"
+    echo -e "  ${BOLD}CPU Load:${RESET}   ${cpu_load}%  $(bar "${cpu_load}" 100)"
+    echo -e "  ${BOLD}GPU Util:${RESET}   ${gpu_util}%  $(bar "${gpu_util}" 100)"
+    echo -e "  ${BOLD}CPU Temp:${RESET}   ${cpu_temp}°C $(bar "${cpu_temp}" 100)"
+    echo -e "  ${BOLD}Fan RPM:${RESET}    ${fan1} / ${fan2} ${DIM}(Linuwu-Sense active)${RESET}"
+    echo ""
+    echo -e "  ${BOLD}Uptime:${RESET}     $(format_duration "$uptime_secs")"
+    if [[ -n "$change_ago" && "$change_ago" != "null" ]]; then
+        echo -e "  ${BOLD}Last:${RESET}       ${change_from} → ${profile} $(format_duration "$change_ago")"
+    fi
+    echo ""
+}
+
+cmd_set() {
+    local profile="${1:-}"
+    if [[ -z "$profile" ]]; then
+        echo "Usage: afp set <profile>"
+        echo "Profiles: ${PROFILES[*]}"
+        return 1
+    fi
+
+    # Validate profile
+    local valid=false
+    for p in "${PROFILES[@]}"; do
+        [[ "$p" == "$profile" ]] && valid=true && break
+    done
+    if [[ "$valid" != "true" ]]; then
+        echo -e "${RED}Invalid profile: $profile${RESET}"
+        echo "Available: ${PROFILES[*]}"
+        return 1
+    fi
+
+    # Check turbo requires Linuwu-Sense
+    if [[ "$profile" == "turbo" ]]; then
+        if [[ ! -f "$LINUWU_FAN_SPEED" ]]; then
+            echo -e "${YELLOW}Warning: Turbo profile requires Linuwu-Sense module.${RESET}"
+            echo -e "${DIM}Linuwu-Sense not detected. Will fall back to performance.${RESET}"
+        else
+            # Set fans to 100% directly
+            echo "100,100" | sudo tee "$LINUWU_FAN_SPEED" > /dev/null 2>&1 || true
+        fi
+    fi
+
+    # Write override file
+    echo "$profile" | sudo tee "$OVERRIDE_FILE" > /dev/null
+    # Also set platform_profile for consistency (turbo -> performance)
+    local platform_profile="$profile"
+    [[ "$profile" == "turbo" ]] && platform_profile="performance"
+    echo "$platform_profile" | sudo tee "$PROFILE_PATH" > /dev/null
+
+    local pcolor
+    pcolor=$(profile_color "$profile")
+    echo -e "${pcolor}${BOLD}Profile locked to: $profile${RESET}"
+    echo -e "${DIM}Run 'afp auto' to return to automatic mode.${RESET}"
+}
+
+cmd_auto() {
+    sudo rm -f "$OVERRIDE_FILE"
+    echo -e "${GREEN}${BOLD}Automatic mode restored.${RESET}"
+    echo -e "${DIM}Daemon will now manage profiles based on load and power state.${RESET}"
+}
+
+cmd_profiles() {
+    local current
+    current=$(cat "$PROFILE_PATH" 2>/dev/null || echo "unknown")
+    echo ""
+    echo -e "  ${BOLD}Available Profiles:${RESET}"
+    echo ""
+    for i in "${!PROFILES[@]}"; do
+        local p="${PROFILES[$i]}"
+        local pcolor
+        pcolor=$(profile_color "$p")
+        local marker=" "
+        [[ "$p" == "$current" ]] && marker=">"
+        echo -e "  ${marker} ${pcolor}${BOLD}$((i+1)). $p${RESET}"
+        case "$p" in
+            low-power)              echo -e "     ${DIM}Minimal fans — silent, battery saving${RESET}" ;;
+            quiet)                  echo -e "     ${DIM}Low noise — light office work${RESET}" ;;
+            balanced)               echo -e "     ${DIM}Moderate — general use${RESET}" ;;
+            balanced-performance)   echo -e "     ${DIM}Active cooling — sustained workloads${RESET}" ;;
+            performance)            echo -e "     ${DIM}High cooling — gaming, heavy rendering${RESET}" ;;
+            turbo)                  echo -e "     ${DIM}Maximum fans — 100% speed ${YELLOW}(Linuwu-Sense required)${RESET}" ;;
+        esac
+    done
+    echo ""
+}
+
+cmd_monitor() {
+    while true; do
+        clear
+        local json
+        json=$(read_state)
+
+        if [[ "$json" == "{}" ]]; then
+            echo -e "${YELLOW}Waiting for daemon state...${RESET}"
+            sleep 2
+            continue
+        fi
+
+        local profile mode rule reason power battery cpu_load gpu_util cpu_temp fan1 fan2
+        local cpu_load_high gpu_util_active linuwu_available linuwu_speed
+        profile=$(json_field_str "$json" "profile")
+        mode=$(json_field_str "$json" "mode")
+        rule=$(json_field_str "$json" "rule")
+        reason=$(json_field_str "$json" "reason")
+        power=$(json_field_str "$json" "power")
+        battery=$(json_field "$json" "battery_pct")
+        cpu_load=$(json_field "$json" "cpu_load")
+        gpu_util=$(json_field "$json" "gpu_util")
+        cpu_temp=$(json_field "$json" "cpu_temp")
+        fan1=$(json_field "$json" "fan1_rpm")
+        fan2=$(json_field "$json" "fan2_rpm")
+        cpu_load_high=$(json_field "$json" "cpu_load_high")
+        gpu_util_active=$(json_field "$json" "gpu_util_active")
+        linuwu_available=$(json_field "$json" "linuwu_available")
+        linuwu_speed=$(json_field_str "$json" "linuwu_fan_speed")
+
+        local pcolor
+        pcolor=$(profile_color "$profile")
+
+        echo -e "┌─ ${BOLD}Acer Fan Profiles${RESET} ─────────────────────────────────────────────┐"
+        echo -e "│ Profile: ${pcolor}${BOLD}${profile}${RESET}$(printf '%*s' $((28 - ${#profile})) '')Mode: ${BOLD}${mode^^}${RESET}$(printf '%*s' $((10 - ${#mode})) '')│"
+        echo -e "│ Rule:    ${rule}$(printf '%*s' $((48 - ${#rule})) '')│"
+        echo -e "│                                                           │"
+        echo -e "│ CPU Load:  $(printf '%3s' "$cpu_load")%  $(bar "$cpu_load" 100)  ${DIM}(threshold: ${cpu_load_high:-70}%)${RESET}    │"
+        echo -e "│ GPU Util:  $(printf '%3s' "$gpu_util")%  $(bar "$gpu_util" 100)  ${DIM}(threshold: ${gpu_util_active:-15}%)${RESET}    │"
+        echo -e "│ CPU Temp:  $(printf '%3s' "$cpu_temp")°C $(bar "$cpu_temp" 100)  ${DIM}(TJ: 100°C)${RESET}          │"
+        echo -e "│ Power:     ${power}   Battery: ${battery}%$(printf '%*s' $((28 - ${#power} - ${#battery})) '')│"
+        local sensor_note="via hwmon"
+        [[ "$linuwu_available" == "true" ]] && sensor_note="via Linuwu"
+        echo -e "│ Fans:      ${fan1} / ${fan2} RPM${DIM} (${sensor_note})${RESET}$(printf '%*s' $((20 - ${#fan1} - ${#fan2})) '')│"
+        if [[ "$linuwu_available" == "true" ]]; then
+            local display_speed="${linuwu_speed:-auto}"
+            echo -e "│ Linuwu:    ${GREEN}active${RESET} - fan speed: ${display_speed}$(printf '%*s' $((22 - ${#display_speed})) '')│"
+        else
+            echo -e "│ Linuwu:    ${DIM}not available${RESET}                                  │"
+        fi
+        echo -e "│                                                           │"
+
+        # Show history from JSON
+        echo -e "│ ${DIM}History (recent changes):${RESET}                                    │"
+        # Parse history entries from JSON array
+        local history_raw
+        history_raw=$(echo "$json" | grep -oP '"history"\s*:\s*\[\K[^\]]*' || echo "")
+        if [[ -n "$history_raw" ]]; then
+            echo "$history_raw" | tr ',' '\n' | head -5 | while read -r entry; do
+                entry=$(echo "$entry" | tr -d '"' | xargs)
+                [[ -n "$entry" ]] && echo -e "│  ${DIM}${entry}${RESET}$(printf '%*s' $((55 - ${#entry})) '')│"
+            done
+        fi
+
+        echo -e "└───────────────────────────────────────────────────────────┘"
+        echo ""
+        echo -e "${DIM}Press Ctrl+C to exit. Refreshing every ${POLLING_INTERVAL:-3}s...${RESET}"
+
+        sleep "${POLLING_INTERVAL:-3}"
+    done
+}
+
+cmd_config() {
+    local subcmd="${1:-show}"
+    case "$subcmd" in
+        edit)
+            "${EDITOR:-nano}" "$CONFIG_FILE"
+            echo -e "${GREEN}Config saved. Run 'afp reload' to apply.${RESET}"
+            ;;
+        show|*)
+            if [[ -f "$CONFIG_FILE" ]]; then
+                echo -e "${BOLD}Config: $CONFIG_FILE${RESET}"
+                echo ""
+                cat "$CONFIG_FILE"
+            else
+                echo -e "${YELLOW}No config file found at $CONFIG_FILE${RESET}"
+                echo "Default values are used. Run 'afp config edit' to create one."
+            fi
+            ;;
+    esac
+}
+
+cmd_reload() {
+    if is_daemon_running; then
+        local pid
+        pid=$(cat "$PID_FILE")
+        sudo kill -SIGHUP "$pid"
+        echo -e "${GREEN}Reload signal sent to daemon (PID: $pid).${RESET}"
+    else
+        echo -e "${YELLOW}Daemon is not running.${RESET}"
+    fi
+}
+
+cmd_help() {
+    echo ""
+    echo -e "  ${BOLD}afp${RESET} — Acer Fan Profiles CLI"
+    echo ""
+    echo -e "  ${BOLD}Usage:${RESET}"
+    echo "    afp status [--json]   Show current state"
+    echo "    afp set <profile>     Lock to a specific profile"
+    echo "    afp auto              Return to automatic mode"
+    echo "    afp profiles          List available profiles"
+    echo "    afp monitor           Live monitoring view"
+    echo "    afp config [edit]     Show or edit config"
+    echo "    afp reload            Reload daemon config"
+    echo "    afp help              Show this help"
+    echo ""
+    echo -e "  ${BOLD}Profiles:${RESET} ${PROFILES[*]}"
+    echo ""
+}
+
+# ─── Dispatch ────────────────────────────────────────────────────────────────
+
+case "${1:-status}" in
+    status)     cmd_status "${2:-}" ;;
+    set)        cmd_set "${2:-}" ;;
+    auto)       cmd_auto ;;
+    profiles)   cmd_profiles ;;
+    monitor)    cmd_monitor ;;
+    config)     cmd_config "${2:-show}" ;;
+    reload)     cmd_reload ;;
+    help|--help|-h) cmd_help ;;
+    *)
+        echo -e "${RED}Unknown command: $1${RESET}"
+        cmd_help
+        exit 1
+        ;;
+esac

@@ -1,0 +1,28 @@
+[Unit]
+Description=Acer Fan Profiles — Smart platform profile manager
+Documentation=https://github.com/torvalds/linux/blob/master/drivers/platform/x86/acer-wmi.c
+After=multi-user.target com.system76.PowerDaemon.service linuwu_sense.service
+Wants=com.system76.PowerDaemon.service
+Requires=linuwu_sense.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -f /sys/firmware/acpi/platform_profile ] && exit 0; sleep 1; done; echo "platform_profile not available after 30s"; exit 1'
+ExecStart=/usr/local/bin/acer-fan-profiles
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+Environment=HOME=/home/director
+
+RuntimeDirectory=acer-fan-profiles
+RuntimeDirectoryMode=0755
+
+ProtectSystem=strict
+ReadWritePaths=-/sys/firmware/acpi/platform_profile /run/acer-fan-profiles /home/director/.config/acer-fan-profiles -/sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense
+ProtectHome=read-only
+NoNewPrivileges=false
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
