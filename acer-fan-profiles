@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-readonly VERSION="1.1.0"
+readonly VERSION="2.0.0"
 readonly STATE_DIR="/run/acer-fan-profiles"
 readonly STATE_FILE="${STATE_DIR}/state.json"
 readonly OVERRIDE_FILE="${STATE_DIR}/override"
@@ -69,6 +69,12 @@ NOTIFY_ENABLED=true
 NOTIFY_DEBOUNCE=10
 LOG_LEVEL="info"  # debug, info, warn, error
 
+# Fan curve (continuous temperature-based fan speed)
+FAN_CURVE_ENABLED=false
+FAN_CURVE_POINTS="55:15 65:25 72:40 78:60 85:80 92:100"
+FAN_CURVE_FLOOR=10
+FAN_CURVE_STEP_LIMIT=5
+
 # ─── Runtime State ───────────────────────────────────────────────────────────
 
 current_profile=""
@@ -83,6 +89,9 @@ daemon_start_time=0
 last_change_time=0
 last_change_from=""
 changes_history=()
+
+# Continuous fan curve runtime state
+CURRENT_FAN_SPEED=0
 
 # I4 FIX: Signal handler flags — handlers only set these; main loop acts on them.
 # Direct function calls from async signal handlers risk re-entrancy (e.g., SIGHUP
@@ -132,6 +141,79 @@ validate_numeric() {
     return 0
 }
 
+# ─── Fan Curve Functions ─────────────────────────────────────────────────────
+
+# Piecewise linear interpolation of fan speed from temperature
+# Uses FAN_CURVE_POINTS (format: "temp1:speed1 temp2:speed2 ...") and FAN_CURVE_FLOOR
+# Returns integer fan speed percentage (0-100)
+calculate_curve_fan_speed() {
+    local temp=$1
+    local -a temps speeds
+    local pair t s
+
+    # Parse FAN_CURVE_POINTS into temps[] and speeds[] arrays
+    for pair in $FAN_CURVE_POINTS; do
+        t="${pair%%:*}"
+        s="${pair##*:}"
+        temps+=("$t")
+        speeds+=("$s")
+    done
+
+    local count=${#temps[@]}
+    if [[ $count -eq 0 ]]; then
+        echo "$FAN_CURVE_FLOOR"
+        return
+    fi
+
+    # Below lowest point → fan_curve_floor
+    if [[ $temp -le ${temps[0]} ]]; then
+        echo "$FAN_CURVE_FLOOR"
+        return
+    fi
+
+    # Above highest point → 100
+    if [[ $temp -ge ${temps[$((count - 1))]} ]]; then
+        echo 100
+        return
+    fi
+
+    # Linear interpolation between two nearest points
+    local i
+    for (( i=1; i<count; i++ )); do
+        if [[ $temp -le ${temps[$i]} ]]; then
+            local t_low=${temps[$((i-1))]}
+            local t_high=${temps[$i]}
+            local s_low=${speeds[$((i-1))]}
+            local s_high=${speeds[$i]}
+            local t_range=$((t_high - t_low))
+            local s_range=$((s_high - s_low))
+            local t_offset=$((temp - t_low))
+            # Integer arithmetic: round down
+            echo $(( s_low + s_range * t_offset / t_range ))
+            return
+        fi
+    done
+
+    # Fallback (should not reach here)
+    echo 100
+}
+
+# Limit fan speed change per cycle to prevent sudden jumps
+# Returns the step-limited fan speed
+apply_step_limit() {
+    local target=$1
+    local current=$2
+    local max_step=$FAN_CURVE_STEP_LIMIT
+    local diff=$((target - current))
+    if (( diff > max_step )); then
+        echo $((current + max_step))
+    elif (( diff < -max_step )); then
+        echo $((current - max_step))
+    else
+        echo "$target"
+    fi
+}
+
 # Validate all config values after loading
 validate_config() {
     local errors=0
@@ -169,6 +251,36 @@ validate_config() {
     validate_numeric "fan_speed_balanced" "$FAN_SPEED_BALANCED" 0 100 || ((errors++))
     validate_numeric "fan_speed_quiet" "$FAN_SPEED_QUIET" 0 100 || ((errors++))
     validate_numeric "fan_speed_low_power" "$FAN_SPEED_LOW_POWER" 0 100 || ((errors++))
+
+    # Fan curve: floor and step limit ranges
+    validate_numeric "fan_curve_floor" "$FAN_CURVE_FLOOR" 10 50 || ((errors++))
+    validate_numeric "fan_curve_step_limit" "$FAN_CURVE_STEP_LIMIT" 1 20 || ((errors++))
+
+    # Fan curve: validate points format and ascending temps/valid speeds
+    if [[ -n "$FAN_CURVE_POINTS" ]]; then
+        local prev_t=-1
+        local pair t s
+        local curve_errors=0
+        for pair in $FAN_CURVE_POINTS; do
+            if [[ ! "$pair" =~ ^[0-9]+:[0-9]+$ ]]; then
+                log error "Config error: fan_curve_points has invalid entry '$pair' (expected temp:speed)"
+                ((curve_errors++))
+                continue
+            fi
+            t="${pair%%:*}"
+            s="${pair##*:}"
+            if [[ $t -le $prev_t ]]; then
+                log error "Config error: fan_curve_points temperatures must be strictly ascending (got $t after $prev_t)"
+                ((curve_errors++))
+            fi
+            if [[ $s -lt 0 || $s -gt 100 ]]; then
+                log error "Config error: fan_curve_points speed $s out of range 0-100"
+                ((curve_errors++))
+            fi
+            prev_t=$t
+        done
+        errors=$((errors + curve_errors))
+    fi
 
     # Logical validation: thresholds should be in ascending order
     if [[ "$CPU_LOAD_LOW" -ge "$CPU_LOAD_MEDIUM" ]]; then
@@ -236,8 +348,20 @@ load_config() {
             fan_speed_balanced)             FAN_SPEED_BALANCED="$value" ;;
             fan_speed_quiet)                FAN_SPEED_QUIET="$value" ;;
             fan_speed_low_power)            FAN_SPEED_LOW_POWER="$value" ;;
+            # Fan curve
+            fan_curve_enabled)      FAN_CURVE_ENABLED="$value" ;;
+            fan_curve_floor)        FAN_CURVE_FLOOR="$value" ;;
+            fan_curve_step_limit)   FAN_CURVE_STEP_LIMIT="$value" ;;
         esac
     done < "$CONFIG_FILE"
+
+    # fan_curve_points needs special handling: value contains spaces, so we
+    # re-parse the file specifically for this key after the main loop
+    if grep -q '^fan_curve_points:' "$CONFIG_FILE" 2>/dev/null; then
+        local curve_raw
+        curve_raw=$(grep '^fan_curve_points:' "$CONFIG_FILE" | sed 's/^fan_curve_points:[[:space:]]*//' | sed 's/#.*//' | xargs)
+        [[ -n "$curve_raw" ]] && FAN_CURVE_POINTS="$curve_raw"
+    fi
 
     # Validate all loaded values
     if ! validate_config; then
@@ -635,7 +759,24 @@ evaluate_rules() {
 
     # Priority 3: AC rules
     if [[ $cpu_load -lt $CPU_LOAD_LOW && $gpu_util -lt $GPU_UTIL_ACTIVE ]]; then
-        echo "quiet|ac_idle|AC + idle"
+        if [[ "$FAN_CURVE_ENABLED" == "true" ]]; then
+            # Curve floor at idle
+            local idle_speed
+            idle_speed=$(apply_step_limit "$FAN_CURVE_FLOOR" "$CURRENT_FAN_SPEED")
+            echo "curve:${idle_speed}|ac_idle|AC + idle (curve floor ${FAN_CURVE_FLOOR}%)"
+        else
+            echo "quiet|ac_idle|AC + idle"
+        fi
+        return
+    fi
+
+    if [[ "$FAN_CURVE_ENABLED" == "true" ]]; then
+        # Fan curve mode: continuous speed for all AC+load scenarios
+        local curve_target
+        curve_target=$(calculate_curve_fan_speed "$cpu_temp")
+        local curve_speed
+        curve_speed=$(apply_step_limit "$curve_target" "$CURRENT_FAN_SPEED")
+        echo "curve:${curve_speed}|ac_curve|AC + load (CPU ${cpu_load}% temp ${cpu_temp}C curve ${curve_speed}% target ${curve_target}%)"
         return
     fi
 
@@ -704,6 +845,15 @@ apply_hysteresis() {
     pending_since="${hysteresis_data##*|}"
 
     log debug "apply_hysteresis: new_target=$new_target rule=$rule current_profile=$current_profile pending_target=$pending_target"
+
+    # Curve rules bypass hysteresis — the step limiter in evaluate_rules
+    # already handles smooth transitions. No need for time-based delays.
+    if [[ "$rule" == ac_curve || "$rule" == ac_idle && "$new_target" == curve:* ]]; then
+        write_hysteresis_state "" 0
+        log debug "  → Curve rule, bypassing hysteresis, returning $new_target"
+        echo "$new_target"
+        return
+    fi
 
     # Thermal rules bypass hysteresis (instant response to temperature changes)
     # BUT: Only clear pending timer if thermal rule requires UPGRADE
@@ -803,6 +953,61 @@ set_profile() {
     local old_profile="$current_profile"
     local fan_write_ok=false
 
+    # ── Curve mode: continuous fan speed from calculate_curve_fan_speed ──────
+    if [[ "$profile" == curve:* ]]; then
+        local curve_speed="${profile#curve:}"
+
+        # Map curve speed to ACPI platform_profile
+        local platform_profile
+        if [[ $curve_speed -le 30 ]]; then
+            platform_profile="quiet"
+        elif [[ $curve_speed -le 60 ]]; then
+            platform_profile="balanced"
+        else
+            platform_profile="performance"
+        fi
+
+        # FIRST: Set ACPI platform_profile
+        echo "$platform_profile" > "$PROFILE_PATH" 2>/dev/null || true
+
+        # Wait for ACPI to settle
+        sleep 0.5
+
+        # LAST: Write exact fan speed via Linuwu-Sense
+        if [[ "$LINUWU_AVAILABLE" == "true" ]]; then
+            if set_linuwu_fan_speed "$curve_speed" "$curve_speed"; then
+                fan_write_ok=true
+                CURRENT_FAN_SPEED=$curve_speed
+                log debug "Curve fan speed set to ${curve_speed}% (ACPI: ${platform_profile})"
+            else
+                log warn "Failed to set curve fan speed to ${curve_speed}%"
+            fi
+        else
+            # No Linuwu-Sense: fall back to ACPI profile only
+            fan_write_ok=true
+            log debug "Curve mode: Linuwu-Sense unavailable, using ACPI profile ${platform_profile}"
+        fi
+
+        if [[ "$fan_write_ok" == "true" ]]; then
+            current_profile="$profile"
+            if [[ "$same_profile" != "true" ]]; then
+                last_change_time=$(date +%s)
+                last_change_from="$old_profile"
+                local entry
+                entry="$(date '+%H:%M:%S') ${old_profile} -> curve:${curve_speed}% (${rule})"
+                changes_history=("$entry" "${changes_history[@]}")
+                [[ ${#changes_history[@]} -gt 10 ]] && changes_history=("${changes_history[@]:0:10}")
+                log info "Profile changed: $old_profile -> curve:${curve_speed}% ($rule: $reason)"
+                send_notification "curve:${curve_speed}" "$rule" "$reason"
+            else
+                log debug "Curve fan speed re-asserted at ${curve_speed}%"
+            fi
+        fi
+        return 0
+    fi
+
+    # ── Standard discrete profile ─────────────────────────────────────────────
+
     # Handle profile setting based on Linuwu-Sense availability
     if [[ "$LINUWU_AVAILABLE" == "true" ]]; then
         # Use Linuwu-Sense direct fan control
@@ -827,6 +1032,7 @@ set_profile() {
         # LAST: Set fan speed via Linuwu-Sense (after ACPI, so it isn't reset)
         if set_linuwu_fan_speed "$fan_cpu" "$fan_gpu"; then
             fan_write_ok=true
+            CURRENT_FAN_SPEED=$fan_cpu
             log debug "Fan speed set to ${fan_cpu},${fan_gpu}"
         else
             log warn "Failed to set Linuwu fan speed to ${fan_cpu},${fan_gpu}"
@@ -896,6 +1102,7 @@ send_notification() {
         balanced-performance)   icon="power-profile-performance-symbolic"; urgency="normal" ;;
         performance)            icon="power-profile-performance-symbolic"; urgency="normal" ;;
         turbo)                  icon="dialog-warning-symbolic";   urgency="critical" ;;
+        curve:*)                icon="power-profile-performance-symbolic"; urgency="normal" ;;
     esac
 
     summary="Fan Profile: ${profile}"
@@ -1012,10 +1219,24 @@ write_state() {
     linuwu_json_bool="false"
     [[ "$LINUWU_AVAILABLE" == "true" ]] && linuwu_json_bool="true"
 
+    # Build curve-specific fields
+    local curve_profile="false"
+    local fan_speed_pct="null"
+    local curve_target_pct="null"
+    if [[ "$current_profile" == curve:* ]]; then
+        curve_profile="true"
+        fan_speed_pct="${current_profile#curve:}"
+        # curve_target from reason field (best-effort parse)
+        curve_target_pct=$(echo "$reason" | grep -oP 'target \K[0-9]+' || echo "null")
+    fi
+
     cat > "$STATE_FILE" << EOJSON
 {
   "version": "$VERSION",
-  "profile": "$current_profile",
+  "profile": "${current_profile%%:*}",
+  "fan_speed_pct": $fan_speed_pct,
+  "curve_target": $curve_target_pct,
+  "curve_mode": $curve_profile,
   "mode": "$mode",
   "rule": "$rule",
   "reason": "$reason",
@@ -1225,7 +1446,9 @@ main_loop() {
 
         # Sync with actual system profile (detect external changes from system76-power, etc.)
         # Skip in cooperative mode since we intentionally diverge from platform_profile
-        if [[ "$COOPERATIVE_MODE" != "true" ]]; then
+        # Skip in curve mode: current_profile is "curve:XX" which intentionally differs
+        # from the ACPI platform_profile (which reflects only the ACPI tier, not fan speed)
+        if [[ "$COOPERATIVE_MODE" != "true" && "$current_profile" != curve:* ]]; then
             local actual_profile
             actual_profile=$(get_current_profile)
             if [[ "$actual_profile" != "$current_profile" ]]; then
@@ -1283,6 +1506,10 @@ main_loop() {
                     fi
 
                     local fan_cpu fan_gpu
+                    if [[ "$final_profile" == curve:* ]]; then
+                        local _cspd="${final_profile#curve:}"
+                        fan_cpu=$_cspd; fan_gpu=$_cspd
+                    else
                     case "$final_profile" in
                         turbo)                fan_cpu=$FAN_SPEED_TURBO;                fan_gpu=$FAN_SPEED_TURBO ;;
                         performance)          fan_cpu=$FAN_SPEED_PERFORMANCE;          fan_gpu=$FAN_SPEED_PERFORMANCE ;;
@@ -1291,10 +1518,12 @@ main_loop() {
                         quiet)                fan_cpu=$FAN_SPEED_QUIET;                fan_gpu=$FAN_SPEED_QUIET ;;
                         low-power)            fan_cpu=$FAN_SPEED_LOW_POWER;            fan_gpu=$FAN_SPEED_LOW_POWER ;;  # Auto/minimal
                     esac
+                    fi
 
                     log info "Cooperative mode: attempting fan speed ${fan_cpu},${fan_gpu} for ${final_profile} (${rule})"
                     if set_linuwu_fan_speed "$fan_cpu" "$fan_gpu" true; then
                         log info "Cooperative mode: fan speed set successfully"
+                        [[ "$final_profile" == curve:* ]] && CURRENT_FAN_SPEED=$fan_cpu
                         # Only update tracked profile if write succeeded AND verification passed
                         current_profile="$final_profile"
                     else

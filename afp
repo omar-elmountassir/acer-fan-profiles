@@ -109,6 +109,7 @@ cmd_status() {
 
     local profile mode rule reason power battery cpu_load gpu_util cpu_temp
     local fan1 fan2 uptime_secs change_ago change_from linuwu_available linuwu_speed
+    local fan_speed_pct curve_target curve_mode
 
     profile=$(json_field_str "$json" "profile")
     mode=$(json_field_str "$json" "mode")
@@ -126,9 +127,23 @@ cmd_status() {
     uptime_secs=$(json_field "$json" "uptime_secs")
     change_ago=$(json_field "$json" "last_change_ago")
     change_from=$(json_field_str "$json" "last_change_from")
+    fan_speed_pct=$(json_field "$json" "fan_speed_pct")
+    curve_target=$(json_field "$json" "curve_target")
+    curve_mode=$(json_field "$json" "curve_mode")
 
     local pcolor
     pcolor=$(profile_color "$profile")
+
+    # Build profile display string — show fan% for curve mode
+    local profile_display="$profile"
+    if [[ "$curve_mode" == "true" && -n "$fan_speed_pct" && "$fan_speed_pct" != "null" ]]; then
+        profile_display="curve (${fan_speed_pct}%)"
+        if [[ -n "$curve_target" && "$curve_target" != "null" && "$curve_target" != "$fan_speed_pct" ]]; then
+            local ramp_dir="ramping up"
+            [[ $curve_target -lt $fan_speed_pct ]] && ramp_dir="ramping down"
+            profile_display="curve (${fan_speed_pct}%) ${DIM}← target ${curve_target}% (${ramp_dir})${RESET}${pcolor}"
+        fi
+    fi
 
     # Format Linuwu-Sense status
     local linuwu_status
@@ -139,7 +154,7 @@ cmd_status() {
     fi
 
     echo ""
-    echo -e "  ${BOLD}Profile:${RESET}    ${pcolor}${BOLD}${profile}${RESET}"
+    echo -e "  ${BOLD}Profile:${RESET}    ${pcolor}${BOLD}${profile_display}${RESET}"
     echo -e "  ${BOLD}Mode:${RESET}       ${mode}"
     echo -e "  ${BOLD}Rule:${RESET}       ${rule} ${DIM}(${reason})${RESET}"
     echo -e "  ${BOLD}Linuwu:${RESET}     ${linuwu_status}"
@@ -228,6 +243,8 @@ cmd_profiles() {
             turbo)                  echo -e "     ${DIM}Maximum fans — 100% speed ${YELLOW}(Linuwu-Sense required)${RESET}" ;;
         esac
     done
+    echo ""
+    echo -e "  ${DIM}+ curve:${RESET}  Continuous temperature-based fan speed ${DIM}(when fan_curve_enabled: true)${RESET}"
     echo ""
 }
 

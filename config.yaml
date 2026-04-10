@@ -69,3 +69,11 @@ fan_speed_balanced_performance: 60
 fan_speed_balanced: 50
 fan_speed_quiet: 20
 fan_speed_low_power: 0
+
+# Continuous fan curve (replaces discrete profiles for AC+load)
+# When enabled, fan speed tracks temperature via piecewise linear interpolation.
+# The step limiter prevents sudden jumps (max fan_curve_step_limit % per cycle).
+fan_curve_enabled: true
+fan_curve_points: "55:15 65:25 72:40 78:60 85:80 92:100"
+fan_curve_floor: 10
+fan_curve_step_limit: 5
