@@ -999,7 +999,7 @@ set_profile() {
                 [[ ${#changes_history[@]} -gt 10 ]] && changes_history=("${changes_history[@]:0:10}")
                 log info "Profile changed: $old_profile -> curve:${curve_speed}% ($rule: $reason)"
                 # Only notify for serious thermal events
-                if [[ "$rule" == *"thermal_critical"* || "$rule" == *"thermal_escalate"* ]]; then
+                if [[ "$rule" == *"thermal_critical"* ]]; then
                     send_notification "curve:${curve_speed}" "$rule" "$reason"
                 fi
             else
@@ -1076,7 +1076,7 @@ set_profile() {
 
         log info "Profile changed: $old_profile -> $profile ($rule: $reason)"
         # Only notify for serious thermal events
-        if [[ "$rule" == *"thermal_critical"* || "$rule" == *"thermal_escalate"* ]]; then
+        if [[ "$rule" == *"thermal_critical"* ]]; then
             send_notification "$profile" "$rule" "$reason"
         fi
     else
@@ -1505,7 +1505,7 @@ main_loop() {
             if [[ "$COOPERATIVE_MODE" == "true" && "$LINUWU_AVAILABLE" == "true" ]]; then
                 # Cooperative mode: only adjust Linuwu fan speed, respect system76-power's profile
                 # Exception: thermal emergencies override everything
-                if [[ "$rule" == thermal_critical || "$rule" == thermal_escalate ]]; then
+                if [[ "$rule" == thermal_critical ]]; then
                     set_profile "$final_profile" "$rule" "$reason"
                 else
                     # Just adjust fan speed based on our calculated profile, don't change platform_profile

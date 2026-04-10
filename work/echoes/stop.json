@@ -1,0 +1,47 @@
+[
+  {
+    "session_id": "383a184c-0f02-4588-9aa3-b779769fdafa",
+    "transcript_path": "/home/director/.claude/projects/-home-director/383a184c-0f02-4588-9aa3-b779769fdafa.jsonl",
+    "cwd": "/home/director/workspaces/acer-fan-profiles",
+    "permission_mode": "bypassPermissions",
+    "hook_event_name": "Stop",
+    "stop_hook_active": false,
+    "last_assistant_message": "`curve (45%)` \u2014 descente graduelle continue : 75\u219265\u219255\u219245. Exactement le comportement voulu : **transitions douces et inaudibles**.\n\nLa courbe fonctionne. Voici ce qu'on observe en temps r\u00e9el :\n\n| Temps | Profil | Fans | Temp | Commentaire |\n|-------|--------|------|------|-------------|\n| +0s | turbo | 100% | 92\u00b0C | Post-restart thermal spike |\n| +30s | turbo | 100% | 86\u00b0C | S\u00e9curit\u00e9 active, refroidissement |\n| +2min | performance | 75% | 77\u00b0C | Elevated thermal, descente |\n| +3min | **curve (65%)** | 65% | 73\u00b0C | Courbe active ! Step limit en action |\n| +3min15 | **curve (55%)** | 55% | 73\u00b0C | Descente progressive |\n| +3min30 | **curve (45%)** | 45% | ~72\u00b0C | Continue vers la cible (~40%) |\n\nC'est une r\u00e9ussite \u2014 plus de sauts brusques de 20%\u219250%. La courbe donne un r\u00e9sultat interm\u00e9diaire pr\u00e9cis et les transitions sont graduelles. Tu peux observer en continu avec `afp monitor`.\n\nLe tuning des points de la courbe se fera selon ton confort sonore sur les prochaines heures/jours. On pourra ajuster les points dans `~/.config/acer-fan-profiles/config.yaml` et faire `afp reload`."
+  },
+  {
+    "session_id": "383a184c-0f02-4588-9aa3-b779769fdafa",
+    "transcript_path": "/home/director/.claude/projects/-home-director/383a184c-0f02-4588-9aa3-b779769fdafa.jsonl",
+    "cwd": "/home/director/workspaces/acer-fan-profiles",
+    "permission_mode": "bypassPermissions",
+    "hook_event_name": "Stop",
+    "stop_hook_active": true,
+    "last_assistant_message": "[SESSION: #afp-v2-deployment-summary]\n\nAFP v2.0.0 d\u00e9ploy\u00e9 et fonctionnel. Courbe continue active \u2014 fans \u00e0 10% au repos (vs 20% avant), transitions graduelles. 4 commits sur GitHub. Knowledge base en cours de cr\u00e9ation en arri\u00e8re-plan.\n\nPour le tuning : `~/.config/acer-fan-profiles/config.yaml` \u2192 modifier `fan_curve_points` \u2192 `afp reload`."
+  },
+  {
+    "session_id": "383a184c-0f02-4588-9aa3-b779769fdafa",
+    "transcript_path": "/home/director/.claude/projects/-home-director/383a184c-0f02-4588-9aa3-b779769fdafa.jsonl",
+    "cwd": "/home/director/workspaces/acer-fan-profiles",
+    "permission_mode": "bypassPermissions",
+    "hook_event_name": "Stop",
+    "stop_hook_active": false,
+    "last_assistant_message": "Knowledge base cr\u00e9\u00e9 : [WROTE: ~/vault/knowledge/engineering/infrastructure/afp-knowledge-base.md] \u2014 181 lignes, r\u00e9f\u00e9rence compl\u00e8te AFP v2.0 pour futures instances.\n\nTout est termin\u00e9. AFP v2.0.0 est en production avec la courbe continue, le repo est sur GitHub, la documentation est \u00e0 jour, et le knowledge base est en place. La courbe tourne \u00e0 10% au repos \u2014 plus silencieux qu'avant."
+  },
+  {
+    "session_id": "383a184c-0f02-4588-9aa3-b779769fdafa",
+    "transcript_path": "/home/director/.claude/projects/-home-director/383a184c-0f02-4588-9aa3-b779769fdafa.jsonl",
+    "cwd": "/home/director/workspaces/acer-fan-profiles",
+    "permission_mode": "bypassPermissions",
+    "hook_event_name": "Stop",
+    "stop_hook_active": false,
+    "last_assistant_message": "D\u00e9ploy\u00e9. `curve (10%)`, 71\u00b0C, fans silencieux. Z\u00e9ro notifications sauf urgence thermique (88\u00b0C+). Plus de spam."
+  },
+  {
+    "session_id": "383a184c-0f02-4588-9aa3-b779769fdafa",
+    "transcript_path": "/home/director/.claude/projects/-home-director/383a184c-0f02-4588-9aa3-b779769fdafa.jsonl",
+    "cwd": "/home/director/workspaces/acer-fan-profiles",
+    "permission_mode": "bypassPermissions",
+    "hook_event_name": "Stop",
+    "stop_hook_active": false,
+    "last_assistant_message": "Notifications d\u00e9sactiv\u00e9es. Plus aucun `notify-send`. Le daemon g\u00e8re tout en silence \u2014 tu peux checker avec `afp status` quand tu veux."
+  }
+]
