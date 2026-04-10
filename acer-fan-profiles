@@ -998,7 +998,10 @@ set_profile() {
                 changes_history=("$entry" "${changes_history[@]}")
                 [[ ${#changes_history[@]} -gt 10 ]] && changes_history=("${changes_history[@]:0:10}")
                 log info "Profile changed: $old_profile -> curve:${curve_speed}% ($rule: $reason)"
-                send_notification "curve:${curve_speed}" "$rule" "$reason"
+                # Only notify for serious thermal events
+                if [[ "$rule" == *"thermal_critical"* || "$rule" == *"thermal_escalate"* ]]; then
+                    send_notification "curve:${curve_speed}" "$rule" "$reason"
+                fi
             else
                 log debug "Curve fan speed re-asserted at ${curve_speed}%"
             fi
@@ -1072,7 +1075,10 @@ set_profile() {
         [[ ${#changes_history[@]} -gt 10 ]] && changes_history=("${changes_history[@]:0:10}")
 
         log info "Profile changed: $old_profile -> $profile ($rule: $reason)"
-        send_notification "$profile" "$rule" "$reason"
+        # Only notify for serious thermal events
+        if [[ "$rule" == *"thermal_critical"* || "$rule" == *"thermal_escalate"* ]]; then
+            send_notification "$profile" "$rule" "$reason"
+        fi
     else
         log warn "Profile change to $profile failed - keeping current profile $current_profile"
     fi
