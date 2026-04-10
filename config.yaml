@@ -60,7 +60,7 @@ notify_enabled: true
 notify_debounce: 10
 
 # Log level: debug, info, warn, error
-log_level: debug
+log_level: info
 
 # Fan speeds per profile (% — 0=auto/EC, 1-100=manual)
 fan_speed_turbo: 100

@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-readonly VERSION="1.0.0"
+readonly VERSION="1.1.0"
 readonly STATE_DIR="/run/acer-fan-profiles"
 readonly STATE_FILE="${STATE_DIR}/state.json"
 readonly OVERRIDE_FILE="${STATE_DIR}/override"
@@ -67,7 +67,7 @@ FAN_SPEED_LOW_POWER=0
 
 NOTIFY_ENABLED=true
 NOTIFY_DEBOUNCE=10
-LOG_LEVEL="debug"  # debug, info, warn, error (temporarily enabled for troubleshooting)
+LOG_LEVEL="info"  # debug, info, warn, error
 
 # ─── Runtime State ───────────────────────────────────────────────────────────
 
@@ -83,6 +83,13 @@ daemon_start_time=0
 last_change_time=0
 last_change_from=""
 changes_history=()
+
+# I4 FIX: Signal handler flags — handlers only set these; main loop acts on them.
+# Direct function calls from async signal handlers risk re-entrancy (e.g., SIGHUP
+# arriving while load_config is writing global variables). Flag-based approach
+# defers the actual work to the start of the next main loop iteration, which is safe.
+RELOAD_REQUESTED=false
+SHUTDOWN_REQUESTED=false
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
 
@@ -282,7 +289,16 @@ get_cpu_load() {
 get_gpu_util() {
     local util
     util=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ' || true)
-    echo "${util:-0}"
+    if [[ -z "$util" ]]; then
+        # I3 FIX: nvidia-smi failed or returned empty. Instead of silently returning 0
+        # (which would tell the daemon the GPU is idle), return GPU_UTIL_ACTIVE so the
+        # daemon treats the GPU as active. This is the conservative/fail-safe choice:
+        # we'd rather spin fans unnecessarily than under-cool a GPU we can't monitor.
+        log warn "get_gpu_util: nvidia-smi failed or returned empty — returning GPU_UTIL_ACTIVE=${GPU_UTIL_ACTIVE} (fail-safe)"
+        echo "$GPU_UTIL_ACTIVE"
+        return
+    fi
+    echo "$util"
 }
 
 get_cpu_temp_raw() {
@@ -314,11 +330,19 @@ get_cpu_temp_raw() {
             type=$(cat "${zone}type" 2>/dev/null || echo "")
             if [[ "$type" == "x86_pkg_temp" ]]; then
                 temp=$(cat "${zone}temp" 2>/dev/null || echo "0")
-                echo $((temp / 1000))
-                return
+                local pkg_temp=$((temp / 1000))
+                if [[ $pkg_temp -gt 0 ]]; then
+                    echo $pkg_temp
+                    return
+                fi
             fi
         done
-        echo "0"
+        # I2 FIX: Return 100 instead of 0 when ALL sensor reads fail.
+        # Rationale: if we cannot read temperature, assume worst case (hot).
+        # This triggers performance/turbo profile rather than silently downgrading
+        # to quiet/low-power with an unverified assumption that the system is cool.
+        log warn "get_cpu_temp_raw: all sensor paths failed — returning 100°C (fail-safe)"
+        echo "100"
     fi
 }
 
@@ -417,9 +441,33 @@ get_linuwu_fan_speed() {
     fi
 }
 
+# I6 FIX: Auto-detect the battery sysfs path instead of hardcoding BAT1.
+# Some Acer models expose BAT0, others BAT1, and future hardware may differ.
+# This function finds the first sysfs entry whose 'type' file reads "Battery".
+# Called once during init(); result stored in BATTERY_PATH global.
+detect_battery_path() {
+    local bat_path
+    for bat_path in /sys/class/power_supply/BAT*; do
+        if [[ -f "$bat_path/type" ]] && [[ "$(cat "$bat_path/type" 2>/dev/null)" == "Battery" ]]; then
+            echo "$bat_path"
+            return 0
+        fi
+    done
+    echo ""  # No battery found (desktop or unsupported hardware)
+    return 1
+}
+
+# Runtime battery path (set once in init via detect_battery_path)
+BATTERY_PATH=""
+
 get_battery_percent() {
     local capacity
-    capacity=$(cat /sys/class/power_supply/BAT1/capacity 2>/dev/null || echo "0")
+    # I6 FIX: Use auto-detected BATTERY_PATH instead of hardcoded BAT1
+    if [[ -n "$BATTERY_PATH" ]]; then
+        capacity=$(cat "$BATTERY_PATH/capacity" 2>/dev/null || echo "0")
+    else
+        capacity="0"
+    fi
     echo "$capacity"
 }
 
@@ -853,9 +901,17 @@ send_notification() {
     summary="Fan Profile: ${profile}"
     [[ "$rule" == thermal_critical ]] && urgency="critical"
 
-    # Use sudo -u to send as the desktop user if running as root
+    # I5 FIX: Use loginctl first to reliably find the active graphical session user.
+    # The old "who | grep" approach is fragile: 'who' can list stale TTY sessions,
+    # SSH logins, or return nothing in headless/systemd-managed environments.
+    # loginctl is the authoritative source for active graphical sessions.
     local display_user
-    display_user=$(who | grep -oP '^\S+' | head -1 || true)
+    display_user=$(loginctl list-sessions --no-legend 2>/dev/null | awk 'NR==1{print $3}')
+    if [[ -z "$display_user" ]]; then
+        # Fallback to who if loginctl returned nothing (e.g., older systemd or no sessions)
+        display_user=$(who | grep -oP '^\S+' | head -1 || true)
+    fi
+    # If both methods fail, skip notification silently — it is not a critical path
     if [[ -n "$display_user" ]]; then
         sudo -u "$display_user" DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$display_user")/bus" \
             notify-send -i "$icon" -u "$urgency" "$summary" "$reason" 2>/dev/null || true
@@ -1012,14 +1068,16 @@ check_override() {
 # ─── Signal Handlers ─────────────────────────────────────────────────────────
 
 reload_handler() {
-    log info "Received SIGHUP — reloading configuration"
-    load_config
+    # I4 FIX: Only set flag — do NOT call load_config directly from an async signal handler.
+    # Calling non-reentrant functions (e.g., those that modify global vars or do I/O) from
+    # a signal handler while the main loop is mid-execution risks corruption.
+    # The main loop checks RELOAD_REQUESTED at the top of each iteration and acts safely.
+    RELOAD_REQUESTED=true
 }
 
 shutdown_handler() {
-    log info "Received shutdown signal — cleaning up"
-    rm -f "$PID_FILE" || true
-    exit 0
+    # I4 FIX: Only set flag — deferred to main loop to ensure clean shutdown path.
+    SHUTDOWN_REQUESTED=true
 }
 
 # ─── Initialization ─────────────────────────────────────────────────────────
@@ -1047,6 +1105,15 @@ init() {
 
     # Load config
     load_config
+
+    # I6 FIX: Detect battery path once at startup (stored in BATTERY_PATH global).
+    # get_battery_percent() uses BATTERY_PATH instead of the old hardcoded BAT1.
+    BATTERY_PATH=$(detect_battery_path || true)
+    if [[ -n "$BATTERY_PATH" ]]; then
+        log info "Battery detected at: $BATTERY_PATH"
+    else
+        log warn "No battery found under /sys/class/power_supply/BAT* — running as desktop or unsupported hardware"
+    fi
 
     # Detect acer hwmon directory (index may vary between systems)
     HWMON_DIR=""
@@ -1091,13 +1158,68 @@ init() {
 
 main_loop() {
     FIRST_ITERATION=true
+
+    # I1 FIX: Sensor watchdog counters — track consecutive cycles where a sensor
+    # is in its fail-safe fallback state. After 5 consecutive failed cycles (~15s
+    # at 3s polling), escalate to ERROR log. The fail-safe values from I2/I3
+    # already push profiles toward higher fan speeds; this watchdog ensures the
+    # operator is notified if the degraded state persists.
+    SENSOR_FAIL_CPU_COUNT=0
+    SENSOR_FAIL_GPU_COUNT=0
+
     while true; do
+        # I4 FIX: Check signal flags at top of iteration BEFORE any sensor reads.
+        # This ensures deferred signal actions run in a safe, synchronous context.
+        if [[ "$SHUTDOWN_REQUESTED" == "true" ]]; then
+            log info "Shutdown signal received — cleaning up"
+            rm -f "$PID_FILE" || true
+            exit 0
+        fi
+        if [[ "$RELOAD_REQUESTED" == "true" ]]; then
+            log info "Received SIGHUP — reloading configuration"
+            load_config
+            RELOAD_REQUESTED=false
+        fi
+
         # Read sensors
         local cpu_load gpu_util cpu_temp power
         cpu_load=$(get_cpu_load)
         gpu_util=$(get_gpu_util)
         cpu_temp=$(get_cpu_temp)
         power=$(get_power_state)
+
+        # I1 FIX: Sensor watchdog — detect and escalate persistent sensor failures.
+        # get_cpu_temp_raw returns 100 on total failure (I2 fix); get_cpu_temp
+        # smooths over 3 samples so the smoothed value will equal 100 only if all
+        # 3 recent raw readings were fail-safe values (sustained failure).
+        # For GPU, GPU_UTIL_ACTIVE is the fail-safe sentinel (I3 fix).
+        if [[ "$cpu_temp" -ge 100 ]]; then
+            SENSOR_FAIL_CPU_COUNT=$((SENSOR_FAIL_CPU_COUNT + 1))
+            if [[ "$SENSOR_FAIL_CPU_COUNT" -eq 5 ]]; then
+                log error "SENSOR WATCHDOG: CPU temperature sensor has been in fail-safe state for 5+ consecutive cycles (~15s) — hardware sensor may be unavailable"
+            elif [[ "$SENSOR_FAIL_CPU_COUNT" -gt 1 ]]; then
+                log warn "SENSOR WATCHDOG: CPU temperature sensor fail-safe active for ${SENSOR_FAIL_CPU_COUNT} consecutive cycles"
+            fi
+        else
+            SENSOR_FAIL_CPU_COUNT=0
+        fi
+
+        if [[ "$gpu_util" -eq "$GPU_UTIL_ACTIVE" ]]; then
+            # Only count as GPU sensor failure if nvidia-smi is expected to be present.
+            # We detect failure by checking if nvidia-smi exists but returned empty.
+            if ! nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | grep -q '[0-9]'; then
+                SENSOR_FAIL_GPU_COUNT=$((SENSOR_FAIL_GPU_COUNT + 1))
+                if [[ "$SENSOR_FAIL_GPU_COUNT" -eq 5 ]]; then
+                    log error "SENSOR WATCHDOG: GPU utilization sensor has been in fail-safe state for 5+ consecutive cycles (~15s) — nvidia-smi may be unavailable"
+                elif [[ "$SENSOR_FAIL_GPU_COUNT" -gt 1 ]]; then
+                    log warn "SENSOR WATCHDOG: GPU utilization sensor fail-safe active for ${SENSOR_FAIL_GPU_COUNT} consecutive cycles"
+                fi
+            else
+                SENSOR_FAIL_GPU_COUNT=0
+            fi
+        else
+            SENSOR_FAIL_GPU_COUNT=0
+        fi
 
         log debug "Sensors: cpu=${cpu_load}% gpu=${gpu_util}% temp=${cpu_temp}C power=${power} profile=${current_profile}"
 
