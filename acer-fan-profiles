@@ -1089,6 +1089,15 @@ send_notification() {
     local now
     now=$(date +%s)
 
+    # Skip notification for curve-to-curve adjustments (same mode, just percentage change)
+    local old_type="${last_change_from%%:*}"  # "curve" or "quiet" etc
+    local new_type="${profile%%:*}"           # "curve" or "performance" etc
+    if [[ "$old_type" == "curve" && "$new_type" == "curve" ]]; then
+        # Same mode, just fan speed percentage adjustment — no notification
+        log debug "Suppressed curve-to-curve notification: ${last_change_from} -> ${profile}"
+        return 0
+    fi
+
     # Debounce
     local elapsed=$((now - last_notify_time))
     [[ $elapsed -lt $NOTIFY_DEBOUNCE ]] && return 0
