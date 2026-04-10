@@ -1,358 +1,129 @@
-# acer-fan-profiles
+# Acer Fan Profiles (AFP)
 
-Smart fan profile daemon for **Acer Predator PTX17-71** on Pop!\_OS 24.04 LTS.
+Smart, load-aware fan control daemon for the Acer Predator Triton 17X (PTX17-71) running Linux.
 
-Works alongside `system76-power` to provide intelligent, load-aware, automatic switching across all 5 Acer ACPI platform profiles.
+## Why
 
-## Problem
+Stock `acer_wmi` exposes `platform_profile` but changing it has zero effect on fan RPMs on the PTX17-71. This daemon uses [Linuwu-Sense](https://github.com/JafarAkhondali/linuwu-sense) for real fan control with automatic profile switching based on CPU load, GPU utilization, temperature, and power state.
 
-Pop!\_OS ships with `system76-power` which only maps to 3 of 5 available Acer platform profiles:
+## Features
 
-| system76-power | platform_profile | Fan behavior |
-| -------------- | ---------------- | ------------ |
-| Battery        | low-power        | Minimal      |
-| Balanced       | balanced         | Moderate     |
-| Performance    | performance      | Full blast   |
+- **Continuous fan curve** (v2.0) — smooth temperature-based fan speed instead of discrete jumps
+- **6 discrete profiles** — low-power (0%), quiet (20%), balanced (50%), balanced-performance (60%), performance (75%), turbo (100%)
+- **Automatic switching** — load-based rules with thermal priority override
+- **Thermal safety** — 3-tier emergency system (elevated/escalate/critical) with hysteresis bands
+- **Dual-layer control** — ACPI platform_profile + Linuwu-Sense fan_speed in correct write order
+- **CLI tool** (`afp`) — status, monitoring, manual overrides, config management
+- **Systemd service** — hardened with safety nets and auto-restart
 
-The `quiet` and `balanced-performance` profiles are never used, and switching is manual only — no response to CPU load, GPU activity, or temperature.
+## Requirements
 
-## Solution
+- Acer Predator Triton 17X (PTX17-71) or similar with `acer_wmi` driver
+- [Linuwu-Sense](https://github.com/JafarAkhondali/linuwu-sense) kernel module (DKMS recommended)
+- Linux with systemd
+- `nvidia-smi` (optional, for GPU utilization monitoring)
 
-`acer-fan-profiles` monitors system state and automatically selects the optimal profile:
-
-| Condition                                     | Profile                | Fan behavior   |
-| --------------------------------------------- | ---------------------- | -------------- |
-| Battery + idle                                | `low-power`            | Silent         |
-| Battery + light load, or AC + idle            | `quiet`                | Low noise      |
-| AC + light-moderate load                      | `balanced`             | Moderate       |
-| AC + sustained medium load or GPU active      | `balanced-performance` | Active cooling |
-| AC + heavy load, gaming, or thermal emergency | `performance`          | Full blast     |
-
-### Features
-
-- **Load-aware**: Monitors CPU load (`/proc/stat`) and GPU utilization (`nvidia-smi`)
-- **Temperature-aware**: Escalates to `performance` when CPU exceeds 92°C, emergency at 97°C
-- **Power-aware**: Detects AC/battery state instantly
-- **Hysteresis**: Prevents rapid profile flapping (5s upgrade delay, 15s downgrade delay)
-- **Manual override**: Lock to any profile with `afp set <profile>`
-- **Desktop notifications**: Optional `notify-send` on profile changes
-- **Configurable**: All thresholds tunable via `~/.config/acer-fan-profiles/config.yaml`
-- **Safe**: Fails to `performance` if sensors are unreadable. No EC access.
-
-## Prerequisites
-
-- Acer Predator PTX17-71 (or compatible Predator with platform_profile support)
-- Pop!\_OS 24.04 LTS (or any Linux with kernel 6.8+)
-- Kernel parameter: `acer_wmi.predator_v4=1`
+## Installation
 
 ```bash
-# Add kernel parameter (one-time, persists across reboots)
-sudo kernelstub -a "acer_wmi.predator_v4=1"
-sudo reboot
-```
-
-## Install
-
-```bash
-cd ~/nexus/hardware/acer-fan-profiles
+git clone https://github.com/omar-elmountassir/acer-fan-profiles.git
+cd acer-fan-profiles
 sudo ./install.sh
 ```
 
-This installs:
-
-- `/usr/local/bin/acer-fan-profiles` — daemon
-- `/usr/local/bin/afp` — CLI
-- `/etc/systemd/system/acer-fan-profiles.service` — systemd unit
-- `~/.config/acer-fan-profiles/config.yaml` — user config (not overwritten on reinstall)
-
-## Uninstall
+## Usage
 
 ```bash
-cd ~/nexus/hardware/acer-fan-profiles
-sudo ./uninstall.sh
-```
-
-Config is preserved at `~/.config/acer-fan-profiles/`. Kernel parameter is not removed.
-
-## CLI Usage
-
-### `afp status`
-
-Shows current state:
-
-```
-  Profile:    balanced-performance
-  Mode:       auto
-  Rule:       ac_medium (AC + medium load (CPU 42%))
-
-  Power:      ac (battery 88%)
-  CPU Load:   42%  ████████░░░░░░░░░░░░
-  GPU Util:   8%   ██░░░░░░░░░░░░░░░░░░
-  CPU Temp:   78°C ████████████████░░░░
-  Fan RPM:    3200 / 3400 (via Linuwu)
-
-  Uptime:     2h 34m
-  Last:       balanced → balanced-performance 4m ago
-```
-
-### `afp status --json`
-
-JSON output for scripting.
-
-### `afp monitor`
-
-Live terminal dashboard (refreshes every 3s):
-
-```
-┌─ Acer Fan Profiles ──────────────────────────────────┐
-│ Profile: balanced-performance      Mode: AUTO         │
-│ Rule:    ac_medium                                    │
-│                                                       │
-│ CPU Load:  42%  ████████░░░░░░░░░░░░  (threshold: 70%)│
-│ GPU Util:   8%  ██░░░░░░░░░░░░░░░░░░  (threshold: 15%)│
-│ CPU Temp:  78°C ████████████████░░░░  (TJ: 100°C)    │
-│ Power:     AC   Battery: 88%                          │
-│                                                       │
-│ History (recent changes):                             │
-│  14:32:05 balanced → balanced-performance (ac_medium) │
-│  14:28:12 quiet → balanced (ac_light)                 │
-└───────────────────────────────────────────────────────┘
-```
-
-### `afp set <profile>`
-
-Lock to a specific profile (disables auto-switching):
-
-```bash
-afp set performance    # Lock to max fans
-afp set quiet          # Lock to low noise
-afp set balanced       # Lock to moderate
-```
-
-### `afp auto`
-
-Return to automatic mode:
-
-```bash
-afp auto
-```
-
-### `afp profiles`
-
-List all available profiles with descriptions:
-
-```
-  1. low-power
-     Minimal fans — silent, battery saving
-  2. quiet
-     Low noise — light office work
-  3. balanced
-     Moderate — general use
-  4. balanced-performance
-     Active cooling — sustained workloads
-> 5. performance
-     Full blast — gaming, heavy rendering
-```
-
-### `afp config [edit]`
-
-```bash
-afp config        # Show current config
-afp config edit   # Open in $EDITOR
-afp reload        # Apply changes without restart
+afp                   # Show current status
+afp status            # Same as above
+afp status --json     # Raw JSON state
+afp monitor           # Live monitoring TUI
+afp profiles          # List all profiles
+afp set <profile>     # Lock to a specific profile
+afp auto              # Return to automatic mode
+afp config            # Show config file
+afp config edit       # Edit config in $EDITOR
+afp reload            # Reload config (no restart needed)
 ```
 
 ## Configuration
 
-Edit `~/.config/acer-fan-profiles/config.yaml`:
+Config file: `~/.config/acer-fan-profiles/config.yaml`
+
+### Fan Curve (v2.0)
+
+When enabled, replaces discrete profiles with a smooth continuous curve for AC+load scenarios:
 
 ```yaml
-# How often to check sensors (seconds)
-polling_interval: 3
-
-# CPU load thresholds (% average across all cores)
-cpu_load_low: 15 # Below this = idle
-cpu_load_medium: 40 # Below this = light load
-cpu_load_high: 70 # Above this = heavy load
-
-# GPU utilization threshold (%)
-gpu_util_active: 15 # Above this = GPU active
-
-# Temperature thresholds (°C)
-# i9-13900HX TJunction is 100°C
-temp_escalate: 92 # Force performance profile
-temp_critical: 97 # Emergency + desktop notification
-
-# Hysteresis delays (seconds)
-upgrade_delay: 5 # Wait before switching to higher profile
-downgrade_delay: 15 # Wait before switching to lower profile
-
-# Desktop notifications
-notify_enabled: true
-notify_debounce: 10 # Min seconds between notifications
-
-# Logging: debug, info, warn, error
-log_level: info
+fan_curve_enabled: true
+fan_curve_points: "55:15 65:25 72:40 78:60 85:80 92:100"
+fan_curve_floor: 10        # minimum fan speed (%)
+fan_curve_step_limit: 5    # max change per 3s cycle (%)
 ```
 
-### Decision Rules
+The curve uses piecewise linear interpolation between the defined temperature:speed points. The step limiter ensures smooth, inaudible transitions.
 
-Rules are evaluated top-to-bottom, first match wins:
+Battery and idle rules still use fixed profiles. Thermal emergency rules always override the curve.
 
-| Priority | Rule             | Condition                       | Profile              |
-| -------- | ---------------- | ------------------------------- | -------------------- |
-| 100      | thermal_critical | CPU >= 97°C                     | performance          |
-| 90       | thermal_escalate | CPU >= 92°C                     | performance          |
-| —        | battery_idle     | Battery + CPU < 15% + GPU < 15% | low-power            |
-| —        | battery_active   | Battery + any load              | quiet                |
-| —        | ac_idle          | AC + CPU < 15% + GPU < 15%      | quiet                |
-| —        | ac_light         | AC + CPU < 40% + GPU < 15%      | balanced             |
-| —        | ac_medium        | AC + CPU < 70% + GPU < 15%      | balanced-performance |
-| —        | ac_heavy         | AC + CPU >= 70% or GPU >= 15%   | performance          |
+### Thermal Thresholds
 
-### Hysteresis
+Three tiers with hysteresis bands to prevent oscillation:
 
-Prevents rapid profile switching when load fluctuates:
+| Tier | Trigger | Release | Band | Action |
+|------|---------|---------|------|--------|
+| Elevated | 78°C | 71°C | 7°C | performance (75%) |
+| Escalate | 88°C | 81°C | 7°C | turbo (100%) |
+| Critical | 96°C | 89°C | 7°C | emergency turbo (100%) |
 
-- **Upgrade** (e.g., balanced → performance): Requires sustained high load for **5 seconds**
-- **Downgrade** (e.g., performance → balanced): Requires sustained low load for **15 seconds**
-- **Thermal emergency**: Instant, bypasses all delays
-- **Manual override**: Bypasses all rules
+### Load Thresholds
 
-## Bash Aliases
-
-Add to `~/.bashrc` for convenience:
-
-```bash
-alias fan-status='afp status'
-alias fan-max='afp set performance'
-alias fan-auto='afp auto'
-alias fan-quiet='afp set quiet'
-alias fan-monitor='afp monitor'
+```yaml
+cpu_load_low: 12       # Below → quiet
+cpu_load_medium: 25    # Below → balanced
+cpu_load_high: 50      # Above → performance/turbo
+gpu_util_active: 50    # GPU considered active above this
 ```
 
 ## Architecture
 
-```
-                     ┌──────────────────┐
-                     │   Power State    │  /sys/class/power_supply/ACAD
-                     │   (AC/Battery)   │
-                     └────────┬─────────┘
-                              │
-┌──────────────┐              │
-│  CPU Load    │──────────────┤
-│  /proc/stat  │              │
-└──────────────┘              ▼
-                    ┌─────────────────────┐
-┌──────────────┐    │   Decision Engine   │
-│  GPU Usage   │───►│   (rule-based +     │
-│  nvidia-smi  │    │    hysteresis)      │
-└──────────────┘    └──────────┬──────────┘
-                               │
-┌──────────────┐               │
-│  CPU Temp    │───►           │
-│  /sys/thermal│    ┌──────────▼──────────┐
-└──────────────┘    │  /sys/firmware/acpi/ │
-                    │  platform_profile    │
-                    └──────────┬──────────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │  Desktop Notify     │
-                    │  + journald Log     │
-                    └─────────────────────┘
-```
+Three-layer fan control stack:
 
-### Interaction with system76-power
+1. **Hardware** — Embedded Controller (EC) via ACPI `platform_profile`
+2. **Kernel** — Linuwu-Sense module provides `fan_speed` sysfs node
+3. **Userspace** — AFP daemon reads sensors, applies rules, writes both layers
 
-The daemon cooperates with — not replaces — `system76-power`:
+Critical write order: ACPI `platform_profile` first → 0.5s delay → Linuwu `fan_speed`. Writing ACPI resets Linuwu to 0,0.
 
-| Component         | Manages                       | Interface        |
-| ----------------- | ----------------------------- | ---------------- |
-| system76-power    | CPU frequency, GPU power      | D-Bus, sysfs CPU |
-| acer-fan-profiles | Fan curves (platform_profile) | sysfs ACPI       |
+## Safety
 
-No conflicts. They manage different kernel interfaces.
-
-### Safety
-
-- **Read-only monitoring** of CPU, GPU, temp, power — no risk
-- **Single write target**: `/sys/firmware/acpi/platform_profile`
-- **Fails safe**: If daemon crashes, last profile stays active
-- **No EC access**: Only uses safe sysfs interface
-- **Watchdog**: Sets `performance` if sensors become unreadable
-
-## Logs
-
-```bash
-# View daemon logs
-journalctl -u acer-fan-profiles.service -f
-
-# View recent profile changes
-journalctl -u acer-fan-profiles.service --since "1 hour ago" | grep "Profile changed"
-```
+- Thermal emergency rules always override everything
+- Fail-safe sensor readings (returns hot/active on failure)
+- Sensor watchdog alerts after consecutive failures
+- Signal handlers are re-entrant safe
+- EC has final authority during thermal protection
+- `afp set performance` provides instant safe fallback
 
 ## Troubleshooting
 
-### Daemon won't start
-
+### Fans not spinning
 ```bash
-# Check status
-systemctl status acer-fan-profiles.service
-
-# Check if kernel parameter is set
-cat /sys/module/acer_wmi/parameters/predator_v4
-# Should show: Y
-
-# Check if platform_profile exists
-cat /sys/firmware/acpi/platform_profile
+afp status                           # Check daemon state
+systemctl status acer-fan-profiles   # Check service
+lsmod | grep linuwu                  # Check module loaded
+afp set performance                  # Force 75% fans
 ```
 
-### Profile not switching
-
+### Temperature too high
 ```bash
-# Check daemon state
-afp status
-
-# Enable debug logging
-afp config edit
-# Change: log_level: debug
-afp reload
-
-# Watch decisions in real-time
-journalctl -u acer-fan-profiles.service -f
+afp set turbo                        # Force 100% fans immediately
 ```
 
-### Fan RPM sensor accuracy
-
-**With stock acer-wmi driver**: The sensor may show ~1413 RPM constantly (bitmask limitation).
-
-**With Linuwu-Sense module**: The sensor shows accurate, varying RPM values (1900-6200 RPM range). Linuwu-Sense provides proper WMI integration for accurate readings.
-
-## Hardware Info
-
-| Component  | Value                               |
-| ---------- | ----------------------------------- |
-| Model      | Acer Predator PTX17-71              |
-| Board      | Carrera_RTX (RPL, V1.09)            |
-| CPU        | Intel i9-13900HX (TJunction: 100°C) |
-| GPU        | NVIDIA RTX 4090 Laptop              |
-| BIOS       | INSYDE V1.09 (2024-12-16)           |
-| OS         | Pop!\_OS 24.04 LTS                  |
-| Kernel     | 6.17.9-76061709-generic             |
-| WMI Module | acer_wmi (predator_v4=Y)            |
-
-## Files
-
-| File     | Location                                        | Purpose                        |
-| -------- | ----------------------------------------------- | ------------------------------ |
-| Daemon   | `/usr/local/bin/acer-fan-profiles`              | Main daemon script             |
-| CLI      | `/usr/local/bin/afp`                            | Command-line interface         |
-| Service  | `/etc/systemd/system/acer-fan-profiles.service` | systemd unit                   |
-| Config   | `~/.config/acer-fan-profiles/config.yaml`       | User thresholds                |
-| State    | `/run/acer-fan-profiles/state.json`             | Runtime state (CLI reads this) |
-| Override | `/run/acer-fan-profiles/override`               | Manual lock file               |
-| PID      | `/run/acer-fan-profiles/daemon.pid`             | Daemon PID                     |
+### Reset to defaults
+```bash
+afp auto                             # Remove manual override
+sudo systemctl restart acer-fan-profiles
+```
 
 ## License
 
-Free to use and modify. Created for Acer Predator PTX17-71 on Pop!\_OS 24.04 LTS.
+MIT
