@@ -84,6 +84,14 @@ cpu_load_high: 50      # Above → performance/turbo
 gpu_util_active: 50    # GPU considered active above this
 ```
 
+### Notifications
+
+Desktop notifications are restricted to thermal emergencies only:
+- **Critical thermal (93°C+)**: `notify-send` alert fires
+- All other transitions (curve adjustments, mode changes, thermal elevated/escalate): silent
+
+Set `notify_enabled: false` in config to disable entirely.
+
 ## Architecture
 
 Three-layer fan control stack:
