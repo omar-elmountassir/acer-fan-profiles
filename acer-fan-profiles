@@ -413,12 +413,13 @@ get_cpu_load() {
 get_gpu_util() {
     local util
     util=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ' || true)
-    if [[ -z "$util" ]]; then
+    if [[ -z "$util" ]] || ! [[ "$util" =~ ^[0-9]+$ ]]; then
         # I3 FIX: nvidia-smi failed or returned empty. Instead of silently returning 0
         # (which would tell the daemon the GPU is idle), return GPU_UTIL_ACTIVE so the
         # daemon treats the GPU as active. This is the conservative/fail-safe choice:
         # we'd rather spin fans unnecessarily than under-cool a GPU we can't monitor.
-        log warn "get_gpu_util: nvidia-smi failed or returned empty — returning GPU_UTIL_ACTIVE=${GPU_UTIL_ACTIVE} (fail-safe)"
+        # I4 FIX: guard non-numeric output (e.g. "Failed to initialize NVML") — same fail-safe.
+        log warn "get_gpu_util: nvidia-smi returned '${util}' (empty or non-numeric) — returning GPU_UTIL_ACTIVE=${GPU_UTIL_ACTIVE} (fail-safe)"
         echo "$GPU_UTIL_ACTIVE"
         return
     fi
