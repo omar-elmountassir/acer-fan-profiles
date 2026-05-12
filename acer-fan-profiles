@@ -1592,5 +1592,11 @@ main_loop() {
 
 # ─── Entry Point ─────────────────────────────────────────────────────────────
 
+# Allow sourcing for tests: when AFP_NO_MAIN=1, skip init + main_loop so test
+# scripts can source the daemon to exercise individual functions in isolation.
+if [[ "${AFP_NO_MAIN:-0}" == "1" ]]; then
+    return 0 2>/dev/null || exit 0
+fi
+
 init
 main_loop
