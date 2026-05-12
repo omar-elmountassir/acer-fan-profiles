@@ -4,7 +4,7 @@ Smart, load-aware fan control daemon for the Acer Predator Triton 17X (PTX17-71)
 
 ## Why
 
-Stock `acer_wmi` exposes `platform_profile` but changing it has zero effect on fan RPMs on the PTX17-71. This daemon uses [Linuwu-Sense](https://github.com/JafarAkhondali/linuwu-sense) for real fan control with automatic profile switching based on CPU load, GPU utilization, temperature, and power state.
+Stock `acer_wmi` exposes `platform_profile` but writing to it has **no direct effect on fan RPMs** on the PTX17-71 — the EC ignores it for fan control. However, `platform_profile` does change CPU power limits (PL1/PL2) and turbo behavior, which indirectly affects thermal load and therefore fan speed via the EC's own thermal response. This daemon uses [Linuwu-Sense](https://github.com/JafarAkhondali/linuwu-sense) for **direct fan control** with automatic profile switching based on CPU load, GPU utilization, temperature, and power state — and optionally cooperates with system76-power's `platform_profile` choices via `cooperative_mode: true`.
 
 ## Features
 
