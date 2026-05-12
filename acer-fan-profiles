@@ -244,6 +244,12 @@ validate_config() {
     # Notify debounce: 0-600 seconds
     validate_numeric "notify_debounce" "$NOTIFY_DEBOUNCE" 0 600 || ((errors++))
 
+    # Cooperative mode: must be boolean
+    if [[ "$COOPERATIVE_MODE" != "true" && "$COOPERATIVE_MODE" != "false" ]]; then
+        log error "Config error: cooperative_mode must be 'true' or 'false', got '$COOPERATIVE_MODE'"
+        ((errors++))
+    fi
+
     # Fan speeds per profile: 0-100%
     validate_numeric "fan_speed_turbo" "$FAN_SPEED_TURBO" 0 100 || ((errors++))
     validate_numeric "fan_speed_performance" "$FAN_SPEED_PERFORMANCE" 0 100 || ((errors++))
@@ -325,6 +331,7 @@ load_config() {
             cpu_load_medium)    CPU_LOAD_MEDIUM="$value" ;;
             cpu_load_high)      CPU_LOAD_HIGH="$value" ;;
             gpu_util_active)    GPU_UTIL_ACTIVE="$value" ;;
+            cooperative_mode)   COOPERATIVE_MODE="$value" ;;
             # Legacy single-threshold config (backward compatibility)
             temp_escalate)      TEMP_ESCALATE="$value"; TEMP_ESCALATE_TRIGGER="$value"; TEMP_ESCALATE_RELEASE="$value" ;;
             temp_critical)      TEMP_CRITICAL="$value"; TEMP_CRITICAL_TRIGGER="$value"; TEMP_CRITICAL_RELEASE="$value" ;;
@@ -369,7 +376,7 @@ load_config() {
         return 1
     fi
 
-    log info "Config loaded: poll=${POLLING_INTERVAL}s cpu_thresholds=${CPU_LOAD_LOW}/${CPU_LOAD_MEDIUM}/${CPU_LOAD_HIGH} gpu_active=${GPU_UTIL_ACTIVE} temp_triggers=${TEMP_ELEVATED_TRIGGER}/${TEMP_ESCALATE_TRIGGER}/${TEMP_CRITICAL_TRIGGER}"
+    log info "Config loaded: poll=${POLLING_INTERVAL}s cpu_thresholds=${CPU_LOAD_LOW}/${CPU_LOAD_MEDIUM}/${CPU_LOAD_HIGH} gpu_active=${GPU_UTIL_ACTIVE} temp_triggers=${TEMP_ELEVATED_TRIGGER}/${TEMP_ESCALATE_TRIGGER}/${TEMP_CRITICAL_TRIGGER} cooperative=${COOPERATIVE_MODE}"
 }
 
 # ─── Sensor Readers ──────────────────────────────────────────────────────────
@@ -741,7 +748,13 @@ evaluate_rules() {
 
     if $thermal_elevated; then
         write_thermal_state "$thermal_elevated" "$thermal_escalate" "$thermal_critical"
-        echo "performance|thermal_elevated|CPU at ${cpu_temp}C - elevated thermal response"
+        if [[ "$COOPERATIVE_MODE" == "true" ]]; then
+            # Cooperative mode: preserve current profile, only boost fan speed
+            # (the main loop applies FAN_SPEED_PERFORMANCE when rule == thermal_elevated_coop)
+            echo "${current_profile:-balanced}|thermal_elevated_coop|CPU at ${cpu_temp}C - cooperative fan boost"
+        else
+            echo "performance|thermal_elevated|CPU at ${cpu_temp}C - elevated thermal response"
+        fi
         return
     fi
 
@@ -1501,8 +1514,9 @@ main_loop() {
         fi
 
         # Apply profile change if needed (force write on first iteration to avoid stale sysfs)
-        log debug "Profile check: final=$final_profile current=$current_profile first_iteration=$FIRST_ITERATION"
-        if [[ "$final_profile" != "$current_profile" ]] || [[ "$FIRST_ITERATION" == "true" ]]; then
+        # thermal_elevated_coop forces re-entry every cycle so fan boost stays asserted
+        log debug "Profile check: final=$final_profile current=$current_profile first_iteration=$FIRST_ITERATION rule=$rule"
+        if [[ "$final_profile" != "$current_profile" ]] || [[ "$FIRST_ITERATION" == "true" ]] || [[ "$rule" == "thermal_elevated_coop" ]]; then
             if [[ "$COOPERATIVE_MODE" == "true" && "$LINUWU_AVAILABLE" == "true" ]]; then
                 # Cooperative mode: only adjust Linuwu fan speed, respect system76-power's profile
                 # Exception: thermal emergencies override everything
@@ -1534,6 +1548,13 @@ main_loop() {
                         quiet)                fan_cpu=$FAN_SPEED_QUIET;                fan_gpu=$FAN_SPEED_QUIET ;;
                         low-power)            fan_cpu=$FAN_SPEED_LOW_POWER;            fan_gpu=$FAN_SPEED_LOW_POWER ;;  # Auto/minimal
                     esac
+                    fi
+
+                    # thermal_elevated_coop: force performance-tier fan speed regardless of
+                    # underlying profile (which we intentionally preserve in cooperative mode)
+                    if [[ "$rule" == "thermal_elevated_coop" ]]; then
+                        fan_cpu=$FAN_SPEED_PERFORMANCE
+                        fan_gpu=$FAN_SPEED_PERFORMANCE
                     fi
 
                     log info "Cooperative mode: attempting fan speed ${fan_cpu},${fan_gpu} for ${final_profile} (${rule})"

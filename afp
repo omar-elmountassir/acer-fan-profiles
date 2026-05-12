@@ -134,14 +134,46 @@ cmd_status() {
     local pcolor
     pcolor=$(profile_color "$profile")
 
-    # Build profile display string — show fan% for curve mode
+    # Build profile display string — mark when curve mode is active
     local profile_display="$profile"
-    if [[ "$curve_mode" == "true" && -n "$fan_speed_pct" && "$fan_speed_pct" != "null" ]]; then
-        profile_display="curve (${fan_speed_pct}%)"
-        if [[ -n "$curve_target" && "$curve_target" != "null" && "$curve_target" != "$fan_speed_pct" ]]; then
-            local ramp_dir="ramping up"
-            [[ $curve_target -lt $fan_speed_pct ]] && ramp_dir="ramping down"
-            profile_display="curve (${fan_speed_pct}%) ${DIM}← target ${curve_target}% (${ramp_dir})${RESET}${pcolor}"
+    if [[ "$curve_mode" == "true" ]]; then
+        profile_display="${profile} ${DIM}(curve active)${RESET}${pcolor}"
+    fi
+
+    # Build curve detail lines (only when curve mode is active with a valid target)
+    local curve_line="" recent_line=""
+    if [[ "$curve_mode" == "true" && -n "$curve_target" && "$curve_target" != "null" \
+          && -n "$fan_speed_pct" && "$fan_speed_pct" != "null" ]]; then
+        # Determine ramp direction by comparing the two most recent curve history entries
+        local ramp_dir="stable"
+        local history_raw h0_dest h1_dest
+        history_raw=$(echo "$json" | grep -oP '"history"\s*:\s*\[\K[^\]]*' || echo "")
+        if [[ -n "$history_raw" ]]; then
+            h0_dest=$(echo "$history_raw" | tr ',' '\n' | sed -n '1p' | grep -oP 'curve:\K[0-9]+(?=%)' | tail -1 || echo "")
+            h1_dest=$(echo "$history_raw" | tr ',' '\n' | sed -n '2p' | grep -oP 'curve:\K[0-9]+(?=%)' | tail -1 || echo "")
+            if [[ -n "$h0_dest" && -n "$h1_dest" ]]; then
+                if [[ $h0_dest -gt $h1_dest ]]; then
+                    ramp_dir="ramping up"
+                elif [[ $h0_dest -lt $h1_dest ]]; then
+                    ramp_dir="ramping down"
+                fi
+            fi
+        fi
+        curve_line="  ${BOLD}Curve:${RESET}      ${curve_target}% target → ${fan_speed_pct}% applied ${DIM}(${ramp_dir}, ±5%/3s)${RESET}"
+
+        # Build "Recent" line: 5 most recent curve:* entries, oldest-first
+        if [[ -n "$history_raw" ]]; then
+            local recent_seq
+            recent_seq=$(echo "$history_raw" \
+                | tr ',' '\n' \
+                | grep -oP '"[0-9:]+ curve:\K[0-9]+' \
+                | head -5 \
+                | tac \
+                | paste -sd '|' -)
+            if [[ -n "$recent_seq" ]]; then
+                local recent_fmt="${recent_seq//|/ → }"
+                recent_line="  ${BOLD}Recent:${RESET}     curve:${recent_fmt}"
+            fi
         fi
     fi
 
@@ -155,6 +187,8 @@ cmd_status() {
 
     echo ""
     echo -e "  ${BOLD}Profile:${RESET}    ${pcolor}${BOLD}${profile_display}${RESET}"
+    [[ -n "$curve_line" ]] && echo -e "$curve_line"
+    [[ -n "$recent_line" ]] && echo -e "$recent_line"
     echo -e "  ${BOLD}Mode:${RESET}       ${mode}"
     echo -e "  ${BOLD}Rule:${RESET}       ${rule} ${DIM}(${reason})${RESET}"
     echo -e "  ${BOLD}Linuwu:${RESET}     ${linuwu_status}"

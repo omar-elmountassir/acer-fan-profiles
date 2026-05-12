@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.1.0] - 2026-05-12
+
+### Fixed
+- `thermal_elevated` rule now honors `cooperative_mode: true` (fixes 93°C runaway loop where the daemon forced `performance` profile even when configured to defer to system76-power)
+- `cooperative_mode` config key is now actually parsed by `load_config` (was previously silently ignored, leaving the variable at its default `false`)
+- Cooperative-mode thermal boost re-asserts every cycle while elevated thermal is active (previously suppressed when `final_profile == current_profile`)
+
+### Added
+- Fan curve state visible in `afp status`: dedicated `Curve:` line shows `target% → applied%` with ramp direction (up/down/stable, ±5%/3s)
+- `Recent:` line in `afp status` shows the last 5 curve transitions (oldest → newest) as a chronological speed sequence
+- New thermal rule `thermal_elevated_coop` distinguishable in logs and `afp status` from the non-cooperative variant
+- Boolean validation for `cooperative_mode` in `validate_config` (rejects non-true/false values)
+
+### Changed
+- `load_config` info log now includes `cooperative=true/false` so the active mode is visible at startup
+
 ## [2.0.0] - 2026-04-10
 
 ### Added
