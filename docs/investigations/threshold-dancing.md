@@ -93,6 +93,6 @@ Plus observabilité : logs `Thermal elevated activated/deactivated (temp X°C �
 
 ## Related
 
-- [system76-governor-2026-04-24.md](system76-governor-2026-04-24.md) — confirme que le fix v1.1.0 a tenu
-- [cooperative-mode-bug-2026-05-12.md](cooperative-mode-bug-2026-05-12.md) — bug suivant : `thermal_elevated` correctement bandé mais `→ performance` hardcoded ignorait `cooperative_mode`
+- [system76-governor.md](system76-governor.md) — confirme que le fix v1.1.0 a tenu
+- [cooperative-mode-bug.md](cooperative-mode-bug.md) — bug suivant : `thermal_elevated` correctement bandé mais `→ performance` hardcoded ignorait `cooperative_mode`
 - `docs/concepts/configuration.md` — config actuelle (TODO: à créer post-split de la KB)

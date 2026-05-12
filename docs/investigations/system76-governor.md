@@ -94,7 +94,7 @@ Mitigation : `EPP=balance_performance` (compromise actuel) reste un bon défaut.
 
 ## Suite donnée
 
-**2026-05-12** : un nouveau bug a été découvert dans la même zone du code (AFP qui ignore `cooperative_mode`). Voir [cooperative-mode-bug-2026-05-12.md](cooperative-mode-bug-2026-05-12.md). Les findings ci-dessus restent valides — pas de régression sur l'interaction governor.
+**2026-05-12** : un nouveau bug a été découvert dans la même zone du code (AFP qui ignore `cooperative_mode`). Voir [cooperative-mode-bug.md](cooperative-mode-bug.md). Les findings ci-dessus restent valides — pas de régression sur l'interaction governor.
 
 ---
 
@@ -115,5 +115,5 @@ Mitigation : `EPP=balance_performance` (compromise actuel) reste un bon défaut.
 ## Incertitudes restantes
 
 1. **Cap 2.2 GHz** : transitoire ou persistant ? Non instrumenté.
-2. **COOPERATIVE_MODE** déployé : avant 2026-05-12, le default `false` était utilisé silencieusement (bug découvert ensuite — voir [cooperative-mode-bug-2026-05-12.md](cooperative-mode-bug-2026-05-12.md)).
+2. **COOPERATIVE_MODE** déployé : avant 2026-05-12, le default `false` était utilisé silencieusement (bug découvert ensuite — voir [cooperative-mode-bug.md](cooperative-mode-bug.md)).
 3. **Race condition** `platform_profile` non mesurée.

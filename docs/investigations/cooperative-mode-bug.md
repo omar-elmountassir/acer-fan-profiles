@@ -181,8 +181,8 @@ La fan curve granulaire (v2.0.0) **fonctionnait déjà** dans le code mais étai
 
 ## Related
 
-- [threshold-dancing-2026-01-31.md](threshold-dancing-2026-01-31.md) — RCA du fix v1.1.0 hysteresis bands (cas voisin : oscillation thermique)
-- [system76-governor-2026-04-24.md](system76-governor-2026-04-24.md) — confirme la cohabitation AFP + system76-power (Phase 6 du plan 2026-05-12 traite l'archivage mcp-memory-service)
+- [threshold-dancing.md](threshold-dancing.md) — RCA du fix v1.1.0 hysteresis bands (cas voisin : oscillation thermique)
+- [system76-governor.md](system76-governor.md) — confirme la cohabitation AFP + system76-power (Phase 6 du plan 2026-05-12 traite l'archivage mcp-memory-service)
 - `docs/ec-override-behavior.md` — EC fan override pendant thermal protection
 - Plan global 2026-05-12 — `~/.claude/plans/nifty-baking-backus.md`
 - Commit `0f65af4` — v2.1.0 release
