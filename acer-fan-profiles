@@ -74,6 +74,7 @@ FAN_CURVE_ENABLED=false
 FAN_CURVE_POINTS="55:15 65:25 72:40 78:60 85:80 92:100"
 FAN_CURVE_FLOOR=10
 FAN_CURVE_STEP_LIMIT=5
+FAN_CURVE_MIN_DELTA=3
 
 # ─── Runtime State ───────────────────────────────────────────────────────────
 
@@ -261,6 +262,7 @@ validate_config() {
     # Fan curve: floor and step limit ranges
     validate_numeric "fan_curve_floor" "$FAN_CURVE_FLOOR" 10 50 || ((errors++))
     validate_numeric "fan_curve_step_limit" "$FAN_CURVE_STEP_LIMIT" 1 20 || ((errors++))
+    validate_numeric "fan_curve_min_delta" "$FAN_CURVE_MIN_DELTA" 1 10 || ((errors++))
 
     # Fan curve: validate points format and ascending temps/valid speeds
     if [[ -n "$FAN_CURVE_POINTS" ]]; then
@@ -359,6 +361,7 @@ load_config() {
             fan_curve_enabled)      FAN_CURVE_ENABLED="$value" ;;
             fan_curve_floor)        FAN_CURVE_FLOOR="$value" ;;
             fan_curve_step_limit)   FAN_CURVE_STEP_LIMIT="$value" ;;
+            fan_curve_min_delta)    FAN_CURVE_MIN_DELTA="$value" ;;
         esac
     done < "$CONFIG_FILE"
 
@@ -1516,10 +1519,22 @@ main_loop() {
             log debug "apply_hysteresis returned: final_profile=$final_profile"
         fi
 
+        # Curve deadzone: skip set_profile if both profiles are curve: and delta is below threshold
+        local skip_curve_change=false
+        if [[ "$final_profile" == curve:* && "$current_profile" == curve:* && "$FIRST_ITERATION" != "true" ]]; then
+            local _cur_speed="${current_profile#curve:}"
+            local _new_speed="${final_profile#curve:}"
+            local _delta=$(( _new_speed > _cur_speed ? _new_speed - _cur_speed : _cur_speed - _new_speed ))
+            if [[ $_delta -lt $FAN_CURVE_MIN_DELTA ]]; then
+                skip_curve_change=true
+                log debug "Curve deadzone: $_cur_speed→$_new_speed (delta=$_delta < $FAN_CURVE_MIN_DELTA), skipping"
+            fi
+        fi
+
         # Apply profile change if needed (force write on first iteration to avoid stale sysfs)
         # thermal_elevated_coop forces re-entry every cycle so fan boost stays asserted
         log debug "Profile check: final=$final_profile current=$current_profile first_iteration=$FIRST_ITERATION rule=$rule"
-        if [[ "$final_profile" != "$current_profile" ]] || [[ "$FIRST_ITERATION" == "true" ]] || [[ "$rule" == "thermal_elevated_coop" ]]; then
+        if [[ "$skip_curve_change" != "true" ]] && { [[ "$final_profile" != "$current_profile" ]] || [[ "$FIRST_ITERATION" == "true" ]] || [[ "$rule" == "thermal_elevated_coop" ]]; }; then
             if [[ "$COOPERATIVE_MODE" == "true" && "$LINUWU_AVAILABLE" == "true" ]]; then
                 # Cooperative mode: only adjust Linuwu fan speed, respect system76-power's profile
                 # Exception: thermal emergencies override everything
