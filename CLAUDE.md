@@ -77,10 +77,11 @@ Tests source the daemon with `AFP_NO_MAIN=1` to skip init and main loop, then ca
 | `thermal.state`      | Hysteresis flags (elevated/escalate/critical booleans)                  |
 | `temp_history.state` | Last 3 raw temp readings for smoothing                                  |
 
-## Active Issues
+## Project Management
 
-- **#1**: Portability / multi-user / install workflow — repo still in `~/hub/envs/` (unstable), needs relocalisation
-- **#2**: Flapping bug — full RCA with 6 sub-bugs. Bug 1 (ac_idle ignoring temperature) is **fixed** (commit `587dabb`). Bugs 2-6 remain.
+Issues and bug tracking on GitHub: `gh issue list`
+
+Do NOT hardcode issue numbers or bug status in this file — it goes stale. Check GitHub for current state.
 
 ## Machine Reference
 
