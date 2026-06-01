@@ -784,7 +784,7 @@ evaluate_rules() {
             idle_floor=$(( curve_idle_target > FAN_CURVE_FLOOR ? curve_idle_target : FAN_CURVE_FLOOR ))
             local idle_speed
             idle_speed=$(apply_step_limit "$idle_floor" "$CURRENT_FAN_SPEED")
-            echo "curve:${idle_speed}|ac_idle|AC + idle (CPU ${cpu_temp}C curve ${curve_idle_target}% floor ${FAN_CURVE_FLOOR}% → ${idle_floor}%)"
+            echo "curve:${idle_speed}|ac_idle|AC + idle (CPU ${cpu_temp}C, curve wants ${curve_idle_target}%, step-limited to ${idle_speed}%)"
         else
             echo "quiet|ac_idle|AC + idle"
         fi
@@ -1352,6 +1352,16 @@ init() {
 
     # Detect Linuwu-Sense availability
     detect_linuwu_sense || true
+
+    # Seed CURRENT_FAN_SPEED from actual hardware (avoids 2-3 cycle ramp-up from 0)
+    if [[ "$LINUWU_AVAILABLE" == "true" ]]; then
+        local _init_speed
+        _init_speed=$(get_linuwu_fan_speed)
+        if [[ "$_init_speed" =~ ^([0-9]+), ]]; then
+            CURRENT_FAN_SPEED=${BASH_REMATCH[1]}
+            log info "Seeded CURRENT_FAN_SPEED from hardware: ${CURRENT_FAN_SPEED}%"
+        fi
+    fi
 
     # Create state directory
     mkdir -p "$STATE_DIR"
