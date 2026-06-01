@@ -9,7 +9,7 @@ about: AFP vs system76-power vs CPU governor interaction
 
 **Date** : 2026-04-24
 **Status** : documented (no action item — informational)
-**Origin** : migrated from `~/nova/.claude/plans/afp-system76-governor-investigation-2026-04-24.md` (2026-05-12)
+**Origin** : migrated from `~/hub/agents/nova/.claude/plans/afp-system76-governor-investigation-2026-04-24.md` (2026-05-12)
 
 ---
 

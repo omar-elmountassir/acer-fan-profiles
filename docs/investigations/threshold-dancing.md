@@ -10,7 +10,7 @@ resolved-in: v1.1.0 (hysteresis bands)
 **Date** : 2026-01-31 04:46 +01
 **System** : Acer Predator PTX17-71 / Phase 2 (Average Core Temp)
 **Status** : RESOLVED in v1.1.0 (hysteresis bands deployed)
-**Origin** : migrated from `~/holon/hands/infra/services/nexus/hardware/acer-fan-profiles/threshold-dancing-analysis.md` (2026-05-12)
+**Origin** : migrated from `~/hub/agents/holon/hands/infra/services/nexus/hardware/acer-fan-profiles/threshold-dancing-analysis.md` (2026-05-12)
 
 ---
 
