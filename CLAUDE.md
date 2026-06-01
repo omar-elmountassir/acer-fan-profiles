@@ -45,7 +45,7 @@ Single-file daemon (`acer-fan-profiles`, ~1500 lines). Key sections in order:
 3. **Fan curve** (`calculate_curve_fan_speed` + `apply_step_limit`) — piecewise linear interpolation between temp:speed points, step-limited to ±N%/cycle
 4. **Sensor readers** (`get_cpu_load`, `get_gpu_util`, `get_cpu_temp`, `get_power_state`) — read `/proc/stat`, `nvidia-smi`, coretemp sysfs, power supply sysfs. All fail-safe: return hot/active on error
 5. **Decision engine** (`evaluate_rules`) — priority chain: thermal critical > thermal escalate > thermal elevated > battery rules > AC load rules. Returns `profile|rule|reason`
-6. **Profile application** (`set_profile`) — writes ACPI `platform_profile` first, then 0.5s delay, then Linuwu-Sense `fan_speed`. Order matters: ACPI write resets Linuwu fans to 0,0
+6. **Profile application** (`set_profile`) — maps curve speed to ACPI tier (quiet/balanced/performance). Only writes ACPI + sleep 0.5 when tier **changes** (cached in `LAST_ACPI_PROFILE`). Then writes Linuwu-Sense fan speed directly. Order matters: ACPI write resets Linuwu fans to 0,0
 7. **Main loop** — polls sensors every N seconds, runs `evaluate_rules`, applies profile if changed, writes state JSON to `/run/acer-fan-profiles/state.json`
 8. **Signal handlers** — flag-based (not direct function calls) to avoid re-entrancy. SIGHUP = reload config, SIGTERM/SIGINT = shutdown
 
@@ -54,10 +54,14 @@ CLI (`afp`) reads the daemon's state JSON and sysfs nodes — no daemon communic
 ## Key Constraints
 
 - **Write order is critical**: ACPI `platform_profile` must be written before Linuwu-Sense `fan_speed`, with a 0.5s gap. Writing ACPI resets Linuwu fans to 0,0
+- **ACPI tier caching**: `LAST_ACPI_PROFILE` tracks the last written tier. Only re-write ACPI when tier changes (quiet↔balanced↔performance). This avoids unnecessary 0.5s sleeps on every cycle.
+- **Curve deadzone**: `fan_curve_min_delta` (default 3%) — if both current and target are curve profiles and the delta is below this threshold, the write is skipped entirely. State JSON still updates.
+- **Step limiter**: `fan_curve_step_limit` (default 5%) — limits fan speed change per cycle to prevent abrupt jumps. This is a SAFETY feature, not a bug. Do not lower.
 - **i9-13900HX idle temp is 70-76°C** — this is normal for this CPU, not a bug
 - **`cooperative_mode: false`** — system76-power is masked; AFP owns profile decisions entirely
 - **Thermal hysteresis**: 7°C bands on all three tiers (elevated/escalate/critical). Trigger and release temps are separate to prevent flapping
 - **Linuwu-Sense is optional**: turbo profile requires it; without it, the daemon falls back to `performance` (75%) for thermal emergencies
+- **Runtime state**: `CURRENT_FAN_SPEED` and `LAST_ACPI_PROFILE` are runtime-only, not persisted. They reset on daemon restart.
 
 ## Testing
 
@@ -85,6 +89,7 @@ Do NOT hardcode issue numbers or bug status in this file — it goes stale. Chec
 
 ## Machine Reference
 
+MUST READ THIS FILE BEFORE WORKING ON THE PROJECT to understand the machine we are working on.
 Full machine docs at `~/work/el-mountassir/machines/acer-predator-triton-17x.md`
 
 ## Config
