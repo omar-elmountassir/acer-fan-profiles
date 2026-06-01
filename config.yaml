@@ -15,7 +15,7 @@ cpu_load_high: 50     # Above this: performance/turbo
 
 # GPU utilization threshold (% — triggers higher profiles)
 # Raised from 15 to 50 because desktop compositor uses 30-50%
-gpu_util_active: 50
+gpu_util_active: 65
 
 # Temperature thresholds (°C — i9-13900HX TJunction is 100°C)
 # NOTE: Now using MAXIMUM core temperature with 3-sample smoothing
