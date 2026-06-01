@@ -93,6 +93,7 @@ changes_history=()
 
 # Continuous fan curve runtime state
 CURRENT_FAN_SPEED=0
+LAST_ACPI_PROFILE=""
 
 # I4 FIX: Signal handler flags — handlers only set these; main loop acts on them.
 # Direct function calls from async signal handlers risk re-entrancy (e.g., SIGHUP
@@ -977,7 +978,7 @@ set_profile() {
     if [[ "$profile" == curve:* ]]; then
         local curve_speed="${profile#curve:}"
 
-        # Map curve speed to ACPI platform_profile
+        # Map curve speed to ACPI platform_profile tier
         local platform_profile
         if [[ $curve_speed -le 30 ]]; then
             platform_profile="quiet"
@@ -987,13 +988,16 @@ set_profile() {
             platform_profile="performance"
         fi
 
-        # FIRST: Set ACPI platform_profile
-        echo "$platform_profile" > "$PROFILE_PATH" 2>/dev/null || true
+        # Only write ACPI platform_profile if the tier changed
+        # (avoids unnecessary sleep 0.5 when tier is unchanged, e.g. curve:38→42 both = balanced)
+        if [[ "$platform_profile" != "${LAST_ACPI_PROFILE:-}" ]]; then
+            echo "$platform_profile" > "$PROFILE_PATH" 2>/dev/null || true
+            sleep 0.5
+            LAST_ACPI_PROFILE="$platform_profile"
+            log debug "ACPI profile tier changed to ${platform_profile}"
+        fi
 
-        # Wait for ACPI to settle
-        sleep 0.5
-
-        # LAST: Write exact fan speed via Linuwu-Sense
+        # Write exact fan speed via Linuwu-Sense
         if [[ "$LINUWU_AVAILABLE" == "true" ]]; then
             if set_linuwu_fan_speed "$curve_speed" "$curve_speed"; then
                 fan_write_ok=true
@@ -1434,6 +1438,7 @@ main_loop() {
         if [[ "$RELOAD_REQUESTED" == "true" ]]; then
             log info "Received SIGHUP — reloading configuration"
             load_config
+            LAST_ACPI_PROFILE=""  # force ACPI re-write after reload
             RELOAD_REQUESTED=false
         fi
 
