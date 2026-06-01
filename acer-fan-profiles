@@ -774,10 +774,13 @@ evaluate_rules() {
     # Priority 3: AC rules
     if [[ $cpu_load -lt $CPU_LOAD_LOW && $gpu_util -lt $GPU_UTIL_ACTIVE ]]; then
         if [[ "$FAN_CURVE_ENABLED" == "true" ]]; then
-            # Curve floor at idle
+            local curve_idle_target
+            curve_idle_target=$(calculate_curve_fan_speed "$cpu_temp")
+            local idle_floor
+            idle_floor=$(( curve_idle_target > FAN_CURVE_FLOOR ? curve_idle_target : FAN_CURVE_FLOOR ))
             local idle_speed
-            idle_speed=$(apply_step_limit "$FAN_CURVE_FLOOR" "$CURRENT_FAN_SPEED")
-            echo "curve:${idle_speed}|ac_idle|AC + idle (curve floor ${FAN_CURVE_FLOOR}%)"
+            idle_speed=$(apply_step_limit "$idle_floor" "$CURRENT_FAN_SPEED")
+            echo "curve:${idle_speed}|ac_idle|AC + idle (CPU ${cpu_temp}C curve ${curve_idle_target}% floor ${FAN_CURVE_FLOOR}% → ${idle_floor}%)"
         else
             echo "quiet|ac_idle|AC + idle"
         fi
