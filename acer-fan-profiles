@@ -1357,6 +1357,10 @@ init() {
     mkdir -p "$STATE_DIR"
     chmod 755 "$STATE_DIR"
 
+    # Clear stale thermal state from previous run
+    # (prevents starting in thermal_elevated/escalate/critical after restart)
+    rm -f "$THERMAL_STATE_FILE"
+
     # Create config directory if needed
     mkdir -p "$CONFIG_DIR"
 
