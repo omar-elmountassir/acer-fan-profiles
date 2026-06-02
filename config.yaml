@@ -78,3 +78,7 @@ fan_curve_enabled: true
 fan_curve_points: "55:15 65:25 72:40 78:60 85:80 92:100"
 fan_curve_floor: 10
 fan_curve_step_limit: 5
+
+# Force ACPI platform_profile to 'performance' at all times
+# Prevents EC from throttling PCIe. Fan speeds are independent (via Linuwu-Sense).
+force_performance_profile: true

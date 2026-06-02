@@ -76,6 +76,10 @@ FAN_CURVE_FLOOR=10
 FAN_CURVE_STEP_LIMIT=5
 FAN_CURVE_MIN_DELTA=3
 
+# Force ACPI platform_profile to 'performance' at all times
+# Prevents EC from throttling PCIe. Fan speeds are independent (Linuwu-Sense).
+FORCE_PERFORMANCE_PROFILE=false
+
 # ─── Runtime State ───────────────────────────────────────────────────────────
 
 current_profile=""
@@ -252,6 +256,12 @@ validate_config() {
         ((errors++))
     fi
 
+    # Force performance profile: must be boolean
+    if [[ "$FORCE_PERFORMANCE_PROFILE" != "true" && "$FORCE_PERFORMANCE_PROFILE" != "false" ]]; then
+        log error "Config error: force_performance_profile must be 'true' or 'false', got '$FORCE_PERFORMANCE_PROFILE'"
+        ((errors++))
+    fi
+
     # Fan speeds per profile: 0-100%
     validate_numeric "fan_speed_turbo" "$FAN_SPEED_TURBO" 0 100 || ((errors++))
     validate_numeric "fan_speed_performance" "$FAN_SPEED_PERFORMANCE" 0 100 || ((errors++))
@@ -363,6 +373,7 @@ load_config() {
             fan_curve_floor)        FAN_CURVE_FLOOR="$value" ;;
             fan_curve_step_limit)   FAN_CURVE_STEP_LIMIT="$value" ;;
             fan_curve_min_delta)    FAN_CURVE_MIN_DELTA="$value" ;;
+            force_performance_profile) FORCE_PERFORMANCE_PROFILE="$value" ;;
         esac
     done < "$CONFIG_FILE"
 
@@ -380,7 +391,9 @@ load_config() {
         return 1
     fi
 
-    log info "Config loaded: poll=${POLLING_INTERVAL}s cpu_thresholds=${CPU_LOAD_LOW}/${CPU_LOAD_MEDIUM}/${CPU_LOAD_HIGH} gpu_active=${GPU_UTIL_ACTIVE} temp_triggers=${TEMP_ELEVATED_TRIGGER}/${TEMP_ESCALATE_TRIGGER}/${TEMP_CRITICAL_TRIGGER} cooperative=${COOPERATIVE_MODE}"
+    log info "Config loaded: poll=${POLLING_INTERVAL}s cpu_thresholds=${CPU_LOAD_LOW}/${CPU_LOAD_MEDIUM}/${CPU_LOAD_HIGH} gpu_active=${GPU_UTIL_ACTIVE} temp_triggers=${TEMP_ELEVATED_TRIGGER}/${TEMP_ESCALATE_TRIGGER}/${TEMP_CRITICAL_TRIGGER} cooperative=${COOPERATIVE_MODE} force_perf_profile=${FORCE_PERFORMANCE_PROFILE}"
+
+    [[ "$FORCE_PERFORMANCE_PROFILE" == "true" ]] && log info "force_performance_profile active: ACPI platform_profile locked to 'performance'"
 }
 
 # ─── Sensor Readers ──────────────────────────────────────────────────────────
@@ -980,7 +993,9 @@ set_profile() {
 
         # Map curve speed to ACPI platform_profile tier
         local platform_profile
-        if [[ $curve_speed -le 30 ]]; then
+        if [[ "$FORCE_PERFORMANCE_PROFILE" == "true" ]]; then
+            platform_profile="performance"
+        elif [[ $curve_speed -le 30 ]]; then
             platform_profile="quiet"
         elif [[ $curve_speed -le 60 ]]; then
             platform_profile="balanced"
@@ -1051,6 +1066,7 @@ set_profile() {
         # FIRST: Set platform_profile via ACPI (turbo maps to performance)
         local platform_profile="$profile"
         [[ "$profile" == "turbo" ]] && platform_profile="performance"
+        [[ "$FORCE_PERFORMANCE_PROFILE" == "true" ]] && platform_profile="performance"
         echo "$platform_profile" > "$PROFILE_PATH" 2>/dev/null || true
 
         # Wait for ACPI to settle before writing Linuwu fan speed
@@ -1070,6 +1086,7 @@ set_profile() {
             log warn "Turbo profile requires Linuwu-Sense — falling back to performance"
             profile="performance"
         fi
+        [[ "$FORCE_PERFORMANCE_PROFILE" == "true" ]] && profile="performance"
         if echo "$profile" > "$PROFILE_PATH" 2>/dev/null; then
             fan_write_ok=true
         else
