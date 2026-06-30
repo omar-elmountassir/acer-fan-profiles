@@ -1,8 +1,7 @@
 [Unit]
 Description=Acer Fan Profiles — Smart platform profile manager
 Documentation=https://github.com/torvalds/linux/blob/master/drivers/platform/x86/acer-wmi.c
-After=multi-user.target com.system76.PowerDaemon.service linuwu_sense.service
-Wants=com.system76.PowerDaemon.service
+After=multi-user.target linuwu_sense.service
 Requires=linuwu_sense.service
 
 [Service]
