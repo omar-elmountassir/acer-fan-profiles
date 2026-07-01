@@ -21,10 +21,10 @@ Persister `governor=performance` : **SAFE-WITH-CAVEATS** — AFP ne touche PAS a
 
 ## Daemon inventory (état réel 2026-04-24)
 
-| Daemon | État | Enabled | Notes |
-|---|---|---|---|
+| Daemon                     | État                 | Enabled | Notes                      |
+| -------------------------- | -------------------- | ------- | -------------------------- |
 | `com.system76.PowerDaemon` | **active (running)** | enabled | PID 1448, démarré 18:44:41 |
-| `acer-fan-profiles` | **active (running)** | enabled | PID 2075, démarré 18:44:42 |
+| `acer-fan-profiles`        | **active (running)** | enabled | PID 2075, démarré 18:44:42 |
 
 **Contradiction trouvée avec la KB legacy** : l'AFP Knowledge Base disait `system76-power masked`. **Faux** : il tourne en parallèle. La KB doit être corrigée (TODO Phase 3 split).
 
@@ -37,6 +37,7 @@ Persister `governor=performance` : **SAFE-WITH-CAVEATS** — AFP ne touche PAS a
 **NON**. Grep `governor\|scaling_governor\|cpufreq\|cpupower` dans `acer-fan-profiles` → 0 résultats.
 
 AFP opère exclusivement sur :
+
 - `/sys/firmware/acpi/platform_profile` (ACPI EC hints + fan floor)
 - `/sys/module/linuwu_sense/.../predator_sense/fan_speed` (Linuwu fan speed sysfs)
 
@@ -52,6 +53,7 @@ Cohabitation active, conflit limité.
 ### 3. Pourquoi le governor revert à `powersave` au boot ?
 
 system76-power applique son profil Balanced par défaut au démarrage du daemon :
+
 - `scaling_governor = powersave`
 - `energy_performance_preference = balance_performance`
 - Cap temporaire max freq 2.2 GHz lors de l'init (levé ensuite)
@@ -79,6 +81,7 @@ WantedBy=multi-user.target
 ```
 
 Pourquoi B et pas autre :
+
 - A (user service) ne peut pas changer un daemon root via DBus
 - C (cpufrequtils) conflit avec intel_pstate
 - D (sysfs direct) fragile : system76-power peut réécrire
@@ -100,15 +103,15 @@ Mitigation : `EPP=balance_performance` (compromise actuel) reste un bon défaut.
 
 ## Sources d'évidence
 
-| Source | Evidence |
-|---|---|
-| `acer-fan-profiles` daemon source | Grep governor → 0 résultats |
-| `journalctl -b -u com.system76.PowerDaemon` | "setting powersave with max 2200000" |
-| `systemctl status com.system76.PowerDaemon` | active (running) |
-| `system76-power profile` | "Power Profile: Balanced" |
-| `/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor` | "powersave" |
-| `/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference` | "balance_performance" |
-| `/sys/devices/system/cpu/intel_pstate/status` | "active" |
+| Source                                                               | Evidence                             |
+| -------------------------------------------------------------------- | ------------------------------------ |
+| `acer-fan-profiles` daemon source                                    | Grep governor → 0 résultats          |
+| `journalctl -b -u com.system76.PowerDaemon`                          | "setting powersave with max 2200000" |
+| `systemctl status com.system76.PowerDaemon`                          | active (running)                     |
+| `system76-power profile`                                             | "Power Profile: Balanced"            |
+| `/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor`              | "powersave"                          |
+| `/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference` | "balance_performance"                |
+| `/sys/devices/system/cpu/intel_pstate/status`                        | "active"                             |
 
 ---
 

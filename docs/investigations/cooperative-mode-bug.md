@@ -8,7 +8,7 @@ resolved-in: v2.1.0
 # Cooperative Mode Bug — RCA & Fix (v2.1.0)
 
 **Date** : 2026-05-12
-**System** : Acer Predator PTX17-71 / Pop!_OS 24.04 / kernel 6.18.7
+**System** : Acer Predator PTX17-71 / Pop!\_OS 24.04 / kernel 6.18.7
 **Status** : RESOLVED in v2.1.0 (commit `0f65af4`)
 **Symptom observable** : fans à ~6000 RPM, CPU à 93°C, alors que la load CPU mesurée était à 3%.
 
@@ -28,14 +28,14 @@ Résultat empirique : à ≥78°C (seuil `temp_elevated_trigger`), AFP forçait 
 
 ## Mesures avant/après
 
-| Métrique | Avant (loop) | Après (v2.1.0) | Delta |
-|---|---|---|---|
-| CPU package | 91-94 °C | 71-72 °C | **-21 °C** |
-| Fan 1 | 5827 RPM | 1773 RPM | **-70 %** |
-| Fan 2 | 6286 RPM | 1719 RPM | **-73 %** |
-| Profile | `performance` (loop perf↔turbo) | `balanced` (curve actif) | mode auto restauré |
-| Rule | thermal loop | ac_idle (curve floor 10%) | normal |
-| CPU load | 3% | 3% | inchangé |
+| Métrique    | Avant (loop)                    | Après (v2.1.0)            | Delta              |
+| ----------- | ------------------------------- | ------------------------- | ------------------ |
+| CPU package | 91-94 °C                        | 71-72 °C                  | **-21 °C**         |
+| Fan 1       | 5827 RPM                        | 1773 RPM                  | **-70 %**          |
+| Fan 2       | 6286 RPM                        | 1719 RPM                  | **-73 %**          |
+| Profile     | `performance` (loop perf↔turbo) | `balanced` (curve actif)  | mode auto restauré |
+| Rule        | thermal loop                    | ac_idle (curve floor 10%) | normal             |
+| CPU load    | 3%                              | 3%                        | inchangé           |
 
 ---
 
@@ -44,6 +44,7 @@ Résultat empirique : à ≥78°C (seuil `temp_elevated_trigger`), AFP forçait 
 ### Symptôme initial
 
 Le Principal a signalé que les ventilateurs tournaient fort. Premier diagnostic via `sensors` + `ps` :
+
 - CPU à 93°C, fans à 5827/6286 RPM
 - Mais : load CPU = 3%, fréquences entre 1.2-2.8 GHz (loin du turbo 5.4 GHz)
 - → ce n'est pas la charge logicielle. Quelque chose maintient le CPU thermiquement chaud sans raison de charge.
@@ -51,6 +52,7 @@ Le Principal a signalé que les ventilateurs tournaient fort. Premier diagnostic
 ### Premier indice : combat AFP ↔ profile
 
 `afp status` montre :
+
 ```
 Profile: performance  Mode: auto
 Rule: thermal_critical (CPU at 93C - emergency max cooling)
@@ -58,6 +60,7 @@ Last: low-power → performance 33s ago
 ```
 
 `journalctl -u acer-fan-profiles` :
+
 ```
 00:36:23 Profile changed: performance -> turbo (thermal_critical at 92C)
 00:36:27 External profile change detected: turbo -> performance
@@ -160,6 +163,7 @@ Recent:     curve:55 → 50 → 45 → 40 → 35
 ```
 
 La fan curve granulaire (v2.0.0) **fonctionnait déjà** dans le code mais était invisible parce que :
+
 - Le bug `thermal_elevated → performance` empêchait AFP de retomber en `ac_idle` (seul état où la curve s'active)
 - `afp status` n'affichait rien sur le curve mode même quand il était actif
 

@@ -44,14 +44,14 @@ echo "..." > "$HYSTERESIS_STATE_FILE"  # Write
 
 ### IMPORTANT (6) — all closed
 
-| ID | Issue | Fix | Closed |
-|---|---|---|---|
-| I1 | Pas de watchdog sensors | Counter consecutive failures, escalate à performance après 5 | v2.0.0 |
-| I2 | CPU temp returns 0 on failure | Return 100 (fail-safe hot) | v2.0.0 |
-| I3 | GPU util failure silencieux | Log warnings, fail-safe to active threshold | v2.0.0 |
-| I4 | Signal handler re-entrancy | Flag-based handlers, processed in main loop | v2.0.0 |
-| I5 | Notification user detection fragile | `loginctl`-based detection | v2.0.0 |
-| I6 | Hardcoded battery path | Dynamic detection via `/sys/class/power_supply/` glob | v2.0.0 |
+| ID  | Issue                               | Fix                                                          | Closed |
+| --- | ----------------------------------- | ------------------------------------------------------------ | ------ |
+| I1  | Pas de watchdog sensors             | Counter consecutive failures, escalate à performance après 5 | v2.0.0 |
+| I2  | CPU temp returns 0 on failure       | Return 100 (fail-safe hot)                                   | v2.0.0 |
+| I3  | GPU util failure silencieux         | Log warnings, fail-safe to active threshold                  | v2.0.0 |
+| I4  | Signal handler re-entrancy          | Flag-based handlers, processed in main loop                  | v2.0.0 |
+| I5  | Notification user detection fragile | `loginctl`-based detection                                   | v2.0.0 |
+| I6  | Hardcoded battery path              | Dynamic detection via `/sys/class/power_supply/` glob        | v2.0.0 |
 
 ---
 
@@ -63,20 +63,20 @@ N1-N8 (config validation hot-reload, min polling interval, JSON escaping, PID st
 
 ### DOCUMENTATION (3) — partiel
 
-| ID | Issue | Status |
-|---|---|---|
-| D1 | README temperature thresholds outdated | Closed v2.1.0 (2026-05-12) |
-| D2 | COOPERATIVE_MODE not documented | **Open** (à compléter dans `docs/concepts/cooperative-mode.md`) |
-| D3 | No man page | Open (P3) |
+| ID  | Issue                                  | Status                                                          |
+| --- | -------------------------------------- | --------------------------------------------------------------- |
+| D1  | README temperature thresholds outdated | Closed v2.1.0 (2026-05-12)                                      |
+| D2  | COOPERATIVE_MODE not documented        | **Open** (à compléter dans `docs/concepts/cooperative-mode.md`) |
+| D3  | No man page                            | Open (P3)                                                       |
 
 ---
 
 ### SERVICE RELIABILITY (2) — open
 
-| ID | Issue | Action |
-|---|---|---|
-| R1 | RestartSec=5s trop court | Add `StartLimitBurst`/`Interval` to systemd unit |
-| R2 | Pas de resource limits | Add `MemoryMax=50M, CPUQuota=5%` |
+| ID  | Issue                    | Action                                           |
+| --- | ------------------------ | ------------------------------------------------ |
+| R1  | RestartSec=5s trop court | Add `StartLimitBurst`/`Interval` to systemd unit |
+| R2  | Pas de resource limits   | Add `MemoryMax=50M, CPUQuota=5%`                 |
 
 ---
 

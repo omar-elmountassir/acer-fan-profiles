@@ -56,11 +56,11 @@ Le timer de downgrade ne franchit jamais 15s → blocage en performance perpétu
 
 Bandes d'hystérésis 7°C sur 3 tiers :
 
-| Tier | Trigger | Release | Action |
-|---|---|---|---|
-| Elevated | 78°C | 71°C | performance (75% fans) |
-| Escalate | 88°C | 81°C | turbo (100%) |
-| Critical | 96°C | 89°C | emergency turbo (100%) |
+| Tier     | Trigger | Release | Action                 |
+| -------- | ------- | ------- | ---------------------- |
+| Elevated | 78°C    | 71°C    | performance (75% fans) |
+| Escalate | 88°C    | 81°C    | turbo (100%)           |
+| Critical | 96°C    | 89°C    | emergency turbo (100%) |
 
 ### Code
 

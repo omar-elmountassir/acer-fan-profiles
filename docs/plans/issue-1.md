@@ -3,7 +3,7 @@
 > **Status**: Ready for implementation  
 > **Target**: 9.5+/10 (adversarial-reviewed through 6 rounds)  
 > **Date**: 2026-05-31  
-> **Issue**: https://github.com/omar-elmountassir/acer-fan-profiles/issues/1  
+> **Issue**: https://github.com/omar-elmountassir/acer-fan-profiles/issues/1
 
 ---
 
@@ -98,6 +98,7 @@ resolve_config_dir() {
 ### Daemon changes (`acer-fan-profiles`)
 
 **Replace lines 26-27** (`readonly CONFIG_DIR=...` and `readonly CONFIG_FILE=...`) with:
+
 ```bash
 SCRIPT_LIB="$(dirname "${BASH_SOURCE[0]}")/lib"
 source "${SCRIPT_LIB}/config.sh"
@@ -113,6 +114,7 @@ CONFIG_FILE=$(resolve_config_file)
    (resolve_config_file() already handles the no-file case)
 
 2. **Add at top of load_config()**:
+
    ```bash
    local resolved_config
    resolved_config=$(resolve_config_file)
@@ -123,7 +125,6 @@ CONFIG_FILE=$(resolve_config_file)
 3. **Replace ALL `$CONFIG_FILE` references** inside `load_config()` with `$resolved_config`:
    - The `while IFS=': ' read` loop's input: `done < "$resolved_config"`
    - The `fan_curve_points` grep block: replace `$CONFIG_FILE` with `$resolved_config`
-   
 4. **After refactoring**: `grep -n 'CONFIG_FILE' acer-fan-profiles` must return ZERO matches inside `load_config()`. `CONFIG_FILE` is only used in `init()` for `mkdir -p "$CONFIG_DIR"` and in the CLI's config edit commands.
 
 5. **SIGHUP reload**: `load_config()` is already called on SIGHUP. Since it now calls `resolve_config_file()` which re-evaluates paths, reload correctly picks up changes to either global or user config.
@@ -134,6 +135,7 @@ CONFIG_FILE=$(resolve_config_file)
    ```
 
 **`CONFIG_DIR` consumers** (complete audit):
+
 1. `init()`: `mkdir -p "$CONFIG_DIR"` — uses `resolve_config_dir()`. Correct.
 2. State file is in `/run/acer-fan-profiles/` (RuntimeDirectory). Unaffected.
 3. PID file is in `/run/acer-fan-profiles/`. Unaffected.
@@ -143,6 +145,7 @@ Only 1 consumer. Handled.
 ### CLI changes (`afp`)
 
 **Replace line 10** (`readonly CONFIG_FILE=...`) with:
+
 ```bash
 SCRIPT_LIB="$(dirname "${BASH_SOURCE[0]}")/lib"
 source "${SCRIPT_LIB}/config.sh"
@@ -150,6 +153,7 @@ CONFIG_FILE=$(resolve_config_file)
 ```
 
 **`cmd_config()`** — full rewrite:
+
 ```bash
 cmd_config() {
     local subcmd="${1:-show}"
@@ -316,6 +320,7 @@ WantedBy=multi-user.target
 ```
 
 **Design notes**:
+
 - `__INSTALL_USER__` replaced by `sed` at install time. No `User=` directive (runs as root for sysfs access).
 - `Environment=HOME=` ensures daemon resolves `$HOME` to the installing user.
 - `ReadWritePaths` split into 4 separate lines (not one fragile long line).
@@ -444,18 +449,21 @@ No changes needed to targets. `install-tested` calls `install.sh` which now hand
 ## Phase 4: Documentation
 
 ### README.md updates
+
 - Installation instructions (install.sh, config chain)
 - Config chain documentation (user > global > defaults, no merge)
 - `cooperative_mode: false` recommendation when system76-power is disabled
 - "Never create partial config manually" warning
 
 ### CLAUDE.md updates
+
 - New repo path (`~/work/tools/`)
 - Service template approach (`__INSTALL_USER__` sed)
 - `lib/config.sh` as SSOT for config resolution
 - Testing: `test_config_chain.sh` + existing tests
 
 ### CHANGELOG.md
+
 - Entry for v2.2.0: portability release
 
 ---
@@ -480,16 +488,16 @@ Phase 4 (docs)                                    ─┘
 
 ## Acceptance Criteria Mapping
 
-| AC | Phase | How addressed |
-|---|---|---|
-| Repo relocalisé | Phase 0 | Moved to ~/work/tools/ |
-| systemd unit generic | Phase 2 | Template with sed, no hardcoded user |
-| Config depuis /etc/ + override | Phase 1 | Simple override chain via lib/config.sh |
-| install.sh + uninstall.sh testés | Phase 3 | Symlink + template + upgrade detection |
-| Deux users même machine | Phase 1+2 | Global config shared, each user overrides independently |
-| cooperative_mode: false documented | Phase 4 | In README |
-| README mis à jour | Phase 4 | Full update |
-| Makefile avec make install | Phase 3 | install.sh handles symlink (Makefile unchanged) |
+| AC                                 | Phase     | How addressed                                           |
+| ---------------------------------- | --------- | ------------------------------------------------------- |
+| Repo relocalisé                    | Phase 0   | Moved to ~/work/tools/                                  |
+| systemd unit generic               | Phase 2   | Template with sed, no hardcoded user                    |
+| Config depuis /etc/ + override     | Phase 1   | Simple override chain via lib/config.sh                 |
+| install.sh + uninstall.sh testés   | Phase 3   | Symlink + template + upgrade detection                  |
+| Deux users même machine            | Phase 1+2 | Global config shared, each user overrides independently |
+| cooperative_mode: false documented | Phase 4   | In README                                               |
+| README mis à jour                  | Phase 4   | Full update                                             |
+| Makefile avec make install         | Phase 3   | install.sh handles symlink (Makefile unchanged)         |
 
 ---
 
